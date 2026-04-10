@@ -1,0 +1,18 @@
+{
+    "name": "BOL Scanner — BMH Solutions",
+    "short_name": "BOL Scanner",
+    "description": "Scan and save signed Bills of Lading",
+    "start_url": ".",
+    "display": "standalone",
+    "orientation": "portrait",
+    "background_color": "#1a1a2e",
+    "theme_color": "#e5b524",
+    "icons": [
+        {
+            "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='32' fill='%231a1a2e'/%3E%3Ctext x='96' y='110' text-anchor='middle' font-size='80'%3E%F0%9F%93%84%3C/text%3E%3Ctext x='96' y='155' text-anchor='middle' font-family='system-ui' font-size='28' font-weight='700' fill='%23e5b524'%3EBOL%3C/text%3E%3C/svg%3E",
+            "sizes": "192x192",
+            "type": "image/svg+xml",
+            "purpose": "any maskable"
+        }
+    ]
+}

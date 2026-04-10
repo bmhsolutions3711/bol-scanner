@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a1a2e">
+<link rel="manifest" href="manifest.json">
+<title>BOL Scanner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --border: #2a2a4a;
+    --gold: #e5b524;
+    --gold-dim: rgba(229,181,36,0.15);
+    --text: #e0e0e0;
+    --text-dim: #888;
+    --green: #22c55e;
+    --red: #ef4444;
+}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100dvh; padding: 16px;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Header ──────────────────────────────────────────── */
+.header { text-align: center; padding: 12px 0 16px; border-bottom: 2px solid var(--gold); margin-bottom: 16px; }
+.header h1 { font-size: 22px; color: var(--gold); font-weight: 700; }
+.header .sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+/* ── Load Info ───────────────────────────────────────── */
+.load-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+.load-card .load-num { font-size: 20px; font-weight: 700; color: var(--gold); }
+.load-card .broker { font-size: 14px; color: var(--text); margin-top: 4px; }
+.load-card .route { font-size: 13px; color: var(--text-dim); margin-top: 2px; }
+.load-card .status { font-size: 11px; margin-top: 8px; padding: 4px 8px; border-radius: 4px; display: inline-block; }
+.load-card .status.ok { background: rgba(34,197,94,0.15); color: var(--green); }
+.load-card .status.warn { background: rgba(239,68,68,0.15); color: var(--red); }
+.load-card .status.loading { background: var(--gold-dim); color: var(--gold); }
+.load-refresh { float: right; background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; padding: 4px; }
+
+/* ── Pages ───────────────────────────────────────────── */
+.pages-section { margin-bottom: 16px; }
+.pages-header { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+.pages-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
+.page-thumb { position: relative; aspect-ratio: 3/4; border: 2px solid var(--border); border-radius: 8px; overflow: hidden; cursor: pointer; }
+.page-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.page-thumb .page-num { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.7); color: var(--gold); font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
+.page-thumb .page-remove { position: absolute; top: 4px; right: 4px; background: rgba(239,68,68,0.85); color: #fff; border: none; border-radius: 50%; width: 22px; height: 22px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.empty-state { text-align: center; padding: 24px; color: var(--text-dim); font-size: 13px; border: 2px dashed var(--border); border-radius: 10px; }
+
+/* ── Actions ─────────────────────────────────────────── */
+.actions { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; border-radius: 10px; border: none; font-size: 16px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; pointer-events: none; }
+.btn-scan { background: var(--surface); border: 2px solid var(--gold); color: var(--gold); }
+.btn-save { background: var(--gold); color: #1a1a2e; }
+.btn-clear { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 14px; padding: 12px; }
+#cameraInput { display: none; }
+
+/* ── Progress ────────────────────────────────────────── */
+.progress-bar { display: none; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 16px; }
+.progress-bar .fill { height: 100%; background: var(--gold); transition: width 0.3s; }
+
+/* ── Toast ───────────────────────────────────────────── */
+.toast { position: fixed; bottom: 24px; left: 16px; right: 16px; padding: 14px 16px; border-radius: 10px; font-size: 14px; font-weight: 600; text-align: center; transform: translateY(120%); transition: transform 0.3s; z-index: 200; }
+.toast.show { transform: translateY(0); }
+.toast.success { background: var(--green); color: #fff; }
+.toast.error { background: var(--red); color: #fff; }
+
+/* ── Install Banner ──────────────────────────────────── */
+.install-banner { display: none; background: var(--gold-dim); border: 1px solid var(--gold); border-radius: 10px; padding: 12px; margin-bottom: 16px; text-align: center; }
+.install-banner .install-btn { background: var(--gold); color: #1a1a2e; border: none; padding: 8px 20px; border-radius: 6px; font-weight: 600; font-size: 13px; cursor: pointer; margin-top: 8px; }
+.install-banner p { font-size: 12px; color: var(--text-dim); }
+
+/* ── Crop Editor ─────────────────────────────────────── */
+.crop-editor {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: var(--bg); flex-direction: column;
+}
+.crop-editor.active { display: flex; }
+.crop-header {
+    padding: 14px 16px; text-align: center;
+    border-bottom: 1px solid var(--border);
+}
+.crop-title { font-size: 15px; font-weight: 600; color: var(--gold); }
+.crop-status { display: block; font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.crop-viewport {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+}
+.crop-viewport canvas { position: absolute; top: 0; left: 0; }
+.crop-actions {
+    display: flex; gap: 10px; padding: 14px 16px;
+    border-top: 1px solid var(--border);
+}
+.crop-actions .btn { flex: 1; padding: 14px; font-size: 15px; }
+.crop-loading {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px;
+    background: rgba(26,26,46,0.9); z-index: 5;
+}
+.crop-loading .spinner {
+    width: 36px; height: 36px; border: 3px solid var(--border);
+    border-top-color: var(--gold); border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>BOL Scanner</h1>
+    <div class="sub">BMH Solutions</div>
+</div>
+
+<div class="install-banner" id="installBanner">
+    <p>Install this app to your home screen for quick access</p>
+    <button class="install-btn" onclick="installApp()">Install App</button>
+</div>
+
+<div class="load-card" id="loadCard">
+    <button class="load-refresh" onclick="fetchLoadInfo()" title="Refresh">&#x21bb;</button>
+    <div class="load-num" id="loadNum">---</div>
+    <div class="broker" id="loadBroker">Loading...</div>
+    <div class="route" id="loadRoute"></div>
+    <span class="status loading" id="loadStatus">Fetching load...</span>
+</div>
+
+<div class="pages-section">
+    <div class="pages-header" id="pagesHeader">Scanned Pages: 0</div>
+    <div id="pagesContainer">
+        <div class="empty-state">No pages scanned yet.<br>Tap <strong>Scan Page</strong> to start.</div>
+    </div>
+</div>
+
+<div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
+
+<div class="actions">
+    <input type="file" id="cameraInput" accept="image/*" capture="environment" onchange="handleCapture(event)">
+    <button class="btn btn-scan" onclick="openCamera()">&#128247; Scan Page</button>
+    <button class="btn btn-save" id="saveBtn" disabled onclick="saveBOL()">&#128190; Save BOL</button>
+    <button class="btn btn-clear" id="clearBtn" disabled onclick="clearPages()">Clear All Pages</button>
+</div>
+
+<!-- ── Crop Editor Overlay ───────────────────────────── -->
+<div class="crop-editor" id="cropEditor">
+    <div class="crop-header">
+        <span class="crop-title">Adjust Document Edges</span>
+        <span class="crop-status" id="cropStatus">Drag corners to fit the document</span>
+    </div>
+    <div class="crop-viewport" id="cropViewport">
+        <canvas id="cropCanvas"></canvas>
+        <div class="crop-loading" id="cropLoading" style="display:none">
+            <div class="spinner"></div>
+            <span style="color:var(--text-dim);font-size:13px" id="cropLoadingText">Detecting edges...</span>
+        </div>
+    </div>
+    <div class="crop-actions">
+        <button class="btn btn-clear" onclick="cropRetake()">Retake</button>
+        <button class="btn btn-scan" onclick="cropSkip()">Skip</button>
+        <button class="btn btn-save" onclick="cropAccept()">Accept</button>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const API = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+    ? 'https://localhost:9877'
+    : 'https://100.118.22.93:9877';
+
+let pages = [];
+let loadInfo = null;
+let installPrompt = null;
+
+// ── Load Info ───────────────────────────────────────────────────────────────
+async function fetchLoadInfo() {
+    const numEl = document.getElementById('loadNum');
+    const brkEl = document.getElementById('loadBroker');
+    const rteEl = document.getElementById('loadRoute');
+    const statEl = document.getElementById('loadStatus');
+    statEl.className = 'status loading';
+    statEl.textContent = 'Fetching load...';
+    try {
+        const res = await fetch(API + '/api/bol-info', { signal: AbortSignal.timeout(10000) });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        loadInfo = data;
+        numEl.textContent = 'Load #' + data.load_number;
+        brkEl.textContent = data.broker_name;
+        rteEl.textContent = data.pickup_city + ', ' + data.pickup_state + '  \u2192  ' + data.delivery_city + ', ' + data.delivery_state;
+        statEl.className = 'status ' + (data.folder_exists ? 'ok' : 'warn');
+        statEl.textContent = data.folder_exists ? 'Folder ready' : 'Folder not found';
+    } catch (e) {
+        numEl.textContent = '---';
+        brkEl.textContent = 'Could not connect';
+        rteEl.textContent = '';
+        statEl.className = 'status warn';
+        statEl.textContent = e.message || 'Connection failed';
+    }
+}
+
+// ── Camera ──────────────────────────────────────────────────────────────────
+function openCamera() {
+    document.getElementById('cameraInput').click();
+}
+
+function handleCapture(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => openCropEditor(e.target.result);
+    reader.readAsDataURL(file);
+    event.target.value = '';
+}
+
+// ── Image Resize ────────────────────────────────────────────────────────────
+function resizeImage(dataUrl, maxPx) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            const ratio = Math.min(maxPx / Math.max(img.width, img.height), 1);
+            const w = Math.round(img.width * ratio);
+            const h = Math.round(img.height * ratio);
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            c.getContext('2d').drawImage(img, 0, 0, w, h);
+            resolve({ dataUrl: c.toDataURL('image/jpeg', 0.85), width: w, height: h });
+        };
+        img.src = dataUrl;
+    });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ── Crop Editor (Document Edge Detection + Perspective Transform) ────────
+// ════════════════════════════════════════════════════════════════════════════
+let cvReady = false;
+let cropState = {
+    imageUrl: null,
+    img: null,
+    corners: [],       // [{x,y}] in image coordinates — TL, TR, BR, BL
+    activeCorner: -1,
+    scale: 1,
+    offsetX: 0,
+    offsetY: 0
+};
+
+// ── Load OpenCV.js (lazy, cached) ───────────────────────────────────────────
+function loadOpenCV() {
+    return new Promise((resolve, reject) => {
+        if (cvReady) { resolve(); return; }
+        const el = document.getElementById('cropLoading');
+        const txt = document.getElementById('cropLoadingText');
+        el.style.display = 'flex';
+        txt.textContent = 'Loading scanner engine...';
+
+        const script = document.createElement('script');
+        script.setAttribute('async', '');
+        script.src = 'https://docs.opencv.org/4.9.0/opencv.js';
+        script.addEventListener('load', () => {
+            // OpenCV.js may need WASM init
+            if (typeof cv !== 'undefined' && typeof cv.Mat !== 'undefined') {
+                cvReady = true;
+                resolve();
+            } else if (typeof cv !== 'undefined') {
+                cv['onRuntimeInitialized'] = () => { cvReady = true; resolve(); };
+            } else {
+                reject(new Error('OpenCV failed to load'));
+            }
+        });
+        script.addEventListener('error', () => reject(new Error('OpenCV script failed')));
+        document.head.appendChild(script);
+    });
+}
+
+// ── Open Crop Editor ────────────────────────────────────────────────────────
+function openCropEditor(dataUrl) {
+    const editor = document.getElementById('cropEditor');
+    editor.classList.add('active');
+
+    cropState.imageUrl = dataUrl;
+    cropState.activeCorner = -1;
+
+    const img = new Image();
+    img.onload = async () => {
+        cropState.img = img;
+
+        // Default corners — full image with 5% margin
+        const m = 0.05;
+        cropState.corners = [
+            { x: img.width * m,       y: img.height * m },
+            { x: img.width * (1 - m), y: img.height * m },
+            { x: img.width * (1 - m), y: img.height * (1 - m) },
+            { x: img.width * m,       y: img.height * (1 - m) }
+        ];
+
+        renderCropCanvas();
+
+        // Try OpenCV edge detection
+        try {
+            await loadOpenCV();
+            document.getElementById('cropLoadingText').textContent = 'Detecting edges...';
+            // Small delay for UI update
+            await new Promise(r => setTimeout(r, 50));
+            const detected = detectDocument(img);
+            if (detected) {
+                cropState.corners = detected;
+                renderCropCanvas();
+                document.getElementById('cropStatus').textContent = 'Document detected — adjust if needed';
+            } else {
+                document.getElementById('cropStatus').textContent = 'No edges found — position corners manually';
+            }
+        } catch (e) {
+            console.warn('OpenCV not available, manual mode:', e.message);
+            document.getElementById('cropStatus').textContent = 'Manual mode — drag corners to fit';
+        }
+        document.getElementById('cropLoading').style.display = 'none';
+    };
+    img.src = dataUrl;
+
+    // Attach pointer events
+    const canvas = document.getElementById('cropCanvas');
+    canvas.onpointerdown = cropPointerDown;
+    canvas.onpointermove = cropPointerMove;
+    canvas.onpointerup = cropPointerUp;
+    canvas.onpointercancel = cropPointerUp;
+}
+
+function closeCropEditor() {
+    document.getElementById('cropEditor').classList.remove('active');
+    cropState.img = null;
+    cropState.imageUrl = null;
+}
+
+// ── Render Canvas ───────────────────────────────────────────────────────────
+function renderCropCanvas() {
+    const canvas = document.getElementById('cropCanvas');
+    const ctx = canvas.getContext('2d');
+    const img = cropState.img;
+    const vp = document.getElementById('cropViewport');
+
+    const vpW = vp.clientWidth;
+    const vpH = vp.clientHeight;
+    const scale = Math.min(vpW / img.width, vpH / img.height);
+    const drawW = img.width * scale;
+    const drawH = img.height * scale;
+    const offX = (vpW - drawW) / 2;
+    const offY = (vpH - drawH) / 2;
+
+    cropState.scale = scale;
+    cropState.offsetX = offX;
+    cropState.offsetY = offY;
+
+    canvas.width = vpW;
+    canvas.height = vpH;
+
+    // Draw image
+    ctx.drawImage(img, offX, offY, drawW, drawH);
+
+    // Dim area outside crop region
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, vpW, vpH);
+    // Cut out the crop area
+    const c = cropState.corners;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.moveTo(offX + c[0].x * scale, offY + c[0].y * scale);
+    for (let i = 1; i < 4; i++) ctx.lineTo(offX + c[i].x * scale, offY + c[i].y * scale);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    // Redraw image inside crop area (crisp)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(offX + c[0].x * scale, offY + c[0].y * scale);
+    for (let i = 1; i < 4; i++) ctx.lineTo(offX + c[i].x * scale, offY + c[i].y * scale);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(img, offX, offY, drawW, drawH);
+    ctx.restore();
+
+    // Draw border lines
+    ctx.strokeStyle = '#e5b524';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(offX + c[0].x * scale, offY + c[0].y * scale);
+    for (let i = 1; i <= 4; i++) ctx.lineTo(offX + c[i % 4].x * scale, offY + c[i % 4].y * scale);
+    ctx.stroke();
+
+    // Draw corner dots
+    for (let i = 0; i < 4; i++) {
+        const sx = offX + c[i].x * scale;
+        const sy = offY + c[i].y * scale;
+        const isActive = i === cropState.activeCorner;
+        // Outer ring
+        ctx.fillStyle = isActive ? '#fff' : '#e5b524';
+        ctx.beginPath();
+        ctx.arc(sx, sy, isActive ? 16 : 14, 0, Math.PI * 2);
+        ctx.fill();
+        // Inner dot
+        ctx.fillStyle = isActive ? '#e5b524' : '#fff';
+        ctx.beginPath();
+        ctx.arc(sx, sy, isActive ? 9 : 7, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+// ── Pointer Events (touch + mouse) ──────────────────────────────────────────
+function cropPointerDown(e) {
+    e.preventDefault();
+    const rect = e.target.getBoundingClientRect();
+    const tx = e.clientX - rect.left;
+    const ty = e.clientY - rect.top;
+    const { scale, offsetX, offsetY, corners } = cropState;
+
+    let minDist = 50;
+    let idx = -1;
+    for (let i = 0; i < 4; i++) {
+        const sx = offsetX + corners[i].x * scale;
+        const sy = offsetY + corners[i].y * scale;
+        const d = Math.hypot(tx - sx, ty - sy);
+        if (d < minDist) { minDist = d; idx = i; }
+    }
+    cropState.activeCorner = idx;
+    if (idx >= 0) renderCropCanvas();
+}
+
+function cropPointerMove(e) {
+    e.preventDefault();
+    if (cropState.activeCorner < 0) return;
+    const rect = e.target.getBoundingClientRect();
+    const tx = e.clientX - rect.left;
+    const ty = e.clientY - rect.top;
+    const { scale, offsetX, offsetY, img } = cropState;
+    let ix = Math.max(0, Math.min(img.width, (tx - offsetX) / scale));
+    let iy = Math.max(0, Math.min(img.height, (ty - offsetY) / scale));
+    cropState.corners[cropState.activeCorner] = { x: ix, y: iy };
+    renderCropCanvas();
+}
+
+function cropPointerUp(e) {
+    if (cropState.activeCorner >= 0) {
+        cropState.activeCorner = -1;
+        renderCropCanvas();
+    }
+}
+
+// ── Document Detection (OpenCV) ─────────────────────────────────────────────
+function detectDocument(img) {
+    // Draw image to temp canvas for OpenCV
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0);
+
+    let src = cv.imread(c);
+    let gray = new cv.Mat();
+    let blurred = new cv.Mat();
+    let edges = new cv.Mat();
+    let dilated = new cv.Mat();
+
+    try {
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+        cv.Canny(blurred, edges, 40, 120);
+
+        // Dilate to close gaps
+        let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+        cv.dilate(edges, dilated, kernel, new cv.Point(-1, -1), 2);
+        kernel.delete();
+
+        // Find contours
+        let contours = new cv.MatVector();
+        let hierarchy = new cv.Mat();
+        cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+        // Find largest quadrilateral
+        let maxArea = (img.width * img.height) * 0.05; // min 5% of image
+        let bestCorners = null;
+
+        for (let i = 0; i < contours.size(); i++) {
+            let cnt = contours.get(i);
+            let area = cv.contourArea(cnt);
+            if (area > maxArea) {
+                let peri = cv.arcLength(cnt, true);
+                let approx = new cv.Mat();
+                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                if (approx.rows === 4) {
+                    maxArea = area;
+                    let pts = [];
+                    for (let j = 0; j < 4; j++) {
+                        pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+                    }
+                    bestCorners = orderCorners(pts);
+                }
+                approx.delete();
+            }
+        }
+
+        contours.delete();
+        hierarchy.delete();
+        return bestCorners;
+    } finally {
+        src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
+    }
+}
+
+function orderCorners(pts) {
+    // Sort by Y to get top pair and bottom pair
+    pts.sort((a, b) => a.y - b.y);
+    let top = pts.slice(0, 2).sort((a, b) => a.x - b.x);
+    let bot = pts.slice(2, 4).sort((a, b) => a.x - b.x);
+    return [top[0], top[1], bot[1], bot[0]]; // TL, TR, BR, BL
+}
+
+// ── Crop Actions ────────────────────────────────────────────────────────────
+async function cropAccept() {
+    const { img, corners } = cropState;
+    let resultUrl;
+
+    if (cvReady) {
+        // Perspective transform with OpenCV
+        const c = document.createElement('canvas');
+        c.width = img.width; c.height = img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+
+        let srcMat = cv.imread(c);
+        try {
+            const widthT = Math.hypot(corners[1].x - corners[0].x, corners[1].y - corners[0].y);
+            const widthB = Math.hypot(corners[2].x - corners[3].x, corners[2].y - corners[3].y);
+            const heightL = Math.hypot(corners[3].x - corners[0].x, corners[3].y - corners[0].y);
+            const heightR = Math.hypot(corners[2].x - corners[1].x, corners[2].y - corners[1].y);
+            const maxW = Math.round(Math.max(widthT, widthB));
+            const maxH = Math.round(Math.max(heightL, heightR));
+
+            let srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                corners[0].x, corners[0].y,
+                corners[1].x, corners[1].y,
+                corners[2].x, corners[2].y,
+                corners[3].x, corners[3].y
+            ]);
+            let dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
+                0, 0, maxW, 0, maxW, maxH, 0, maxH
+            ]);
+
+            let M = cv.getPerspectiveTransform(srcPts, dstPts);
+            let dst = new cv.Mat();
+            cv.warpPerspective(srcMat, dst, M, new cv.Size(maxW, maxH));
+
+            let outCanvas = document.createElement('canvas');
+            cv.imshow(outCanvas, dst);
+            resultUrl = outCanvas.toDataURL('image/jpeg', 0.90);
+
+            dst.delete(); M.delete(); srcPts.delete(); dstPts.delete();
+        } finally {
+            srcMat.delete();
+        }
+    } else {
+        // Fallback: simple canvas crop (no perspective correction)
+        const minX = Math.min(...corners.map(p => p.x));
+        const maxX = Math.max(...corners.map(p => p.x));
+        const minY = Math.min(...corners.map(p => p.y));
+        const maxY = Math.max(...corners.map(p => p.y));
+        const w = maxX - minX;
+        const h = maxY - minY;
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, minX, minY, w, h, 0, 0, w, h);
+        resultUrl = c.toDataURL('image/jpeg', 0.90);
+    }
+
+    const resized = await resizeImage(resultUrl, 2000);
+    pages.push(resized);
+    renderPages();
+    closeCropEditor();
+}
+
+function cropSkip() {
+    resizeImage(cropState.imageUrl, 2000).then(resized => {
+        pages.push(resized);
+        renderPages();
+        closeCropEditor();
+    });
+}
+
+function cropRetake() {
+    closeCropEditor();
+    setTimeout(() => openCamera(), 200);
+}
+
+// ── Pages Rendering ─────────────────────────────────────────────────────────
+function renderPages() {
+    const container = document.getElementById('pagesContainer');
+    document.getElementById('pagesHeader').textContent = 'Scanned Pages: ' + pages.length;
+    document.getElementById('saveBtn').disabled = pages.length === 0;
+    document.getElementById('clearBtn').disabled = pages.length === 0;
+
+    if (pages.length === 0) {
+        container.innerHTML = '<div class="empty-state">No pages scanned yet.<br>Tap <strong>Scan Page</strong> to start.</div>';
+        return;
+    }
+    let html = '<div class="pages-grid">';
+    pages.forEach((pg, i) => {
+        html += '<div class="page-thumb" onclick="previewPage(' + i + ')">'
+            + '<img src="' + pg.dataUrl + '" alt="Page ' + (i+1) + '">'
+            + '<span class="page-num">' + (i+1) + '</span>'
+            + '<button class="page-remove" onclick="event.stopPropagation();removePage(' + i + ')">&#x2715;</button>'
+            + '</div>';
+    });
+    container.innerHTML = html + '</div>';
+}
+
+function removePage(i) { pages.splice(i, 1); renderPages(); }
+function clearPages() { if (pages.length && confirm('Clear all?')) { pages = []; renderPages(); } }
+function previewPage(i) {
+    const o = document.createElement('div');
+    o.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:150;display:flex;align-items:center;justify-content:center;padding:16px;';
+    const m = document.createElement('img');
+    m.src = pages[i].dataUrl;
+    m.style.cssText = 'max-width:100%;max-height:100%;border-radius:8px;';
+    o.appendChild(m); o.onclick = () => o.remove();
+    document.body.appendChild(o);
+}
+
+// ── Save BOL ────────────────────────────────────────────────────────────────
+async function saveBOL() {
+    if (!pages.length) return;
+    if (!loadInfo || !loadInfo.load_number) { showToast('No load info. Refresh.', 'error'); return; }
+    if (!loadInfo.folder_exists) { showToast('Load folder not found.', 'error'); return; }
+
+    const saveBtn = document.getElementById('saveBtn');
+    const bar = document.getElementById('progressBar');
+    const fill = document.getElementById('progressFill');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Processing...';
+    bar.style.display = 'block';
+    fill.style.width = '10%';
+
+    try {
+        fill.style.width = '20%';
+        const { jsPDF } = window.jspdf;
+        const first = pages[0];
+        const doc = new jsPDF({
+            orientation: first.width > first.height ? 'l' : 'p',
+            unit: 'px', format: [first.width, first.height]
+        });
+
+        for (let i = 0; i < pages.length; i++) {
+            const pg = pages[i];
+            if (i > 0) doc.addPage([pg.width, pg.height], pg.width > pg.height ? 'l' : 'p');
+            doc.addImage(pg.dataUrl, 'JPEG', 0, 0, pg.width, pg.height);
+            fill.style.width = (20 + (i + 1) / pages.length * 40) + '%';
+        }
+
+        fill.style.width = '65%';
+        const pdfBase64 = doc.output('datauristring').split(',')[1];
+
+        fill.style.width = '75%';
+        const res = await fetch(API + '/api/bol-upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pdf: pdfBase64, load_number: loadInfo.load_number }),
+            signal: AbortSignal.timeout(30000)
+        });
+
+        fill.style.width = '95%';
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        fill.style.width = '100%';
+        showToast('Saved: ' + data.filename, 'success');
+        pages = [];
+        renderPages();
+    } catch (e) {
+        showToast('Save failed: ' + (e.message || 'Unknown'), 'error');
+    } finally {
+        saveBtn.disabled = pages.length === 0;
+        saveBtn.textContent = '\uD83D\uDCBE Save BOL';
+        setTimeout(() => { bar.style.display = 'none'; fill.style.width = '0%'; }, 1500);
+    }
+}
+
+// ── Toast ────────────────────────────────────────────────────────────────────
+function showToast(msg, type) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ' + type + ' show';
+    setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+// ── PWA ─────────────────────────────────────────────────────────────────────
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault(); installPrompt = e;
+    document.getElementById('installBanner').style.display = 'block';
+});
+function installApp() {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    installPrompt.userChoice.then(() => {
+        document.getElementById('installBanner').style.display = 'none';
+        installPrompt = null;
+    });
+}
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+fetchLoadInfo();
+</script>
+</body>
+</html>
