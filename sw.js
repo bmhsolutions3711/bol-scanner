@@ -1,4 +1,4 @@
-const CACHE = 'bol-scanner-v2';
+const CACHE = 'bol-scanner-v3';
 const ASSETS = [
     './',
     './index.html',
