@@ -1124,7 +1124,7 @@ async function saveBOL() {
         if (data.error) throw new Error(data.error);
 
         fill.style.width = '100%';
-        showToast('Saved: ' + data.filename, 'success');
+        showToast((data.versioned ? 'Saved new version (kept the old): ' : 'Saved: ') + data.filename, 'success');
         pages = [];
         renderPages();
     } catch (e) {
