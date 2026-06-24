@@ -47,6 +47,7 @@ body {
 .load-card .status.warn { background: rgba(239,68,68,0.15); color: var(--red); }
 .load-card .status.loading { background: var(--gold-dim); color: var(--gold); }
 .load-refresh { float: right; background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; padding: 4px; }
+.load-select { width: 100%; margin-top: 10px; padding: 9px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
 
 /* ── Pages ───────────────────────────────────────────── */
 .pages-section { margin-bottom: 16px; }
@@ -179,6 +180,7 @@ body {
     <div class="broker" id="loadBroker">Loading...</div>
     <div class="route" id="loadRoute"></div>
     <span class="status loading" id="loadStatus">Fetching load...</span>
+    <select id="loadSelect" class="load-select" style="display:none" onchange="selectLoad(this.value)" aria-label="Choose which load to file into"></select>
 </div>
 
 <div class="pages-section">
@@ -254,6 +256,7 @@ const API = (location.hostname === 'localhost' || location.hostname === '127.0.0
 
 let pages = [];
 let loadInfo = null;
+let loadList = [];
 let installPrompt = null;
 
 // ── Load Info ───────────────────────────────────────────────────────────────
@@ -274,6 +277,22 @@ async function fetchLoadInfo() {
         rteEl.textContent = data.pickup_city + ', ' + data.pickup_state + '  \u2192  ' + data.delivery_city + ', ' + data.delivery_state;
         statEl.className = 'status ' + (data.folder_exists ? 'ok' : 'warn');
         statEl.textContent = data.folder_exists ? 'Folder ready' : 'Folder not found';
+        // Populate the load picker — current load + any prebooked loads. Default
+        // stays the current load (loads[0], rendered above); the dropdown lets you
+        // file into a different load's folder when more than one is active.
+        loadList = (data.loads && data.loads.length) ? data.loads : [data];
+        const selEl = document.getElementById('loadSelect');
+        selEl.innerHTML = '';
+        loadList.forEach((L, i) => {
+            const opt = document.createElement('option');
+            opt.value = i;
+            const del = L.delivery_date ? ' · del ' + L.delivery_date : '';
+            opt.textContent = 'Load #' + L.load_number + ' · ' + (L.delivery_city || '?') + ', ' + (L.delivery_state || '') + del;
+            selEl.appendChild(opt);
+        });
+        selEl.style.display = loadList.length > 1 ? 'block' : 'none';
+        selEl.value = '0';
+        selectLoad(0);
     } catch (e) {
         numEl.textContent = '---';
         brkEl.textContent = 'Could not connect';
@@ -281,6 +300,20 @@ async function fetchLoadInfo() {
         statEl.className = 'status warn';
         statEl.textContent = e.message || 'Connection failed';
     }
+}
+
+// Switch the active load from the dropdown (and on initial load). saveBOL()
+// uploads by loadInfo.load_number, so picking here files into the right folder.
+function selectLoad(idx) {
+    loadInfo = (loadList && loadList[parseInt(idx, 10)]) || loadInfo;
+    if (!loadInfo) return;
+    document.getElementById('loadNum').textContent = 'Load #' + loadInfo.load_number;
+    document.getElementById('loadBroker').textContent = loadInfo.broker_name || '';
+    document.getElementById('loadRoute').textContent =
+        loadInfo.pickup_city + ', ' + loadInfo.pickup_state + '  →  ' + loadInfo.delivery_city + ', ' + loadInfo.delivery_state;
+    const s = document.getElementById('loadStatus');
+    s.className = 'status ' + (loadInfo.folder_exists ? 'ok' : 'warn');
+    s.textContent = loadInfo.folder_exists ? 'Folder ready' : 'Folder not found';
 }
 
 // ── Camera ──────────────────────────────────────────────────────────────────
@@ -1124,7 +1157,7 @@ function installApp() {
         installPrompt = null;
     });
 }
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+// SW registration handled by the BIK PWA standard block in <head> (auto-update + #reset).
 
 fetchLoadInfo();
 </script>
