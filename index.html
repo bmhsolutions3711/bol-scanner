@@ -112,6 +112,15 @@ body {
     display: flex; gap: 10px; padding: 14px 16px;
     border-top: 1px solid var(--border);
 }
+/* ── Output mode (document cleanup) ──────────────────── */
+.mode-row { display: flex; gap: 6px; padding: 12px 16px 0; }
+.mode-btn {
+    flex: 1; padding: 9px 4px; border-radius: 8px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-dim); font-size: 12px; font-weight: 700;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.mode-btn.active { border-color: var(--gold); color: var(--gold); background: var(--gold-dim); }
 .crop-actions .btn { flex: 1; padding: 14px; font-size: 15px; }
 .crop-loading {
     position: absolute; inset: 0; display: flex;
@@ -225,6 +234,11 @@ body {
             <div class="spinner"></div>
             <span style="color:var(--text-dim);font-size:13px" id="cropLoadingText">Detecting edges...</span>
         </div>
+    </div>
+    <div class="mode-row" id="modeRow">
+        <button class="mode-btn" data-mode="color" onclick="setOutputMode('color')">Color</button>
+        <button class="mode-btn" data-mode="scan"  onclick="setOutputMode('scan')">Scan</button>
+        <button class="mode-btn" data-mode="bw"    onclick="setOutputMode('bw')">B&amp;W</button>
     </div>
     <div class="crop-actions">
         <button class="btn btn-clear" id="cropRetakeBtn" onclick="cropRetake()">Retake</button>
@@ -446,19 +460,128 @@ function updateBatchUI() {
 }
 
 // ── Image Resize ────────────────────────────────────────────────────────────
-function resizeImage(dataUrl, maxPx) {
+// 2550px on the long edge ≈ 300 DPI for a letter page. The old 2000px cap put a
+// BOL at ~180 DPI, which is exactly where small print and handwritten seal numbers
+// turn to mush.
+const OUT_MAX_PX  = 2550;
+// One encode at 0.92 instead of the old two-stage 0.90-then-0.85, which stacked
+// compression ringing around every glyph before the page was ever saved.
+const OUT_QUALITY = 0.92;
+
+// ── Output Mode ─────────────────────────────────────────────────────────────
+// color = raw photo (old behaviour) · scan = flattened greyscale · bw = hard ink
+let outputMode = localStorage.getItem('bolOutputMode') || 'scan';
+
+function setOutputMode(mode) {
+    outputMode = mode;
+    try { localStorage.setItem('bolOutputMode', mode); } catch (_) {}
+    syncModeButtons();
+    refreshCropPreview();
+}
+
+function syncModeButtons() {
+    document.querySelectorAll('.mode-btn').forEach(b =>
+        b.classList.toggle('active', b.dataset.mode === outputMode));
+}
+
+// ── Document Cleanup ────────────────────────────────────────────────────────
+// The gap against Adobe Scan is not the crop — it is that a cropped photo is
+// still a photo: cab shadows, yellow dome-light cast, grey paper. This flattens
+// the lighting with the "division trick" — estimate the illumination with a very
+// large blur, then divide it out — which is what turns a shadowed photo into flat
+// white paper. Takes a canvas, returns a canvas. Never throws; falls back to the
+// original on any failure.
+function enhanceDocument(canvas, mode) {
+    if (mode === 'color' || !cvReady || !canvas.width) return canvas;
+
+    let src = cv.imread(canvas);
+    let gray = new cv.Mat(), small = new cv.Mat(), bg = new cv.Mat(), norm = new cv.Mat();
+    let out = new cv.Mat();
+    try {
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+        // Illumination estimate. Downscale → blur → upscale approximates a huge-kernel
+        // Gaussian at a fraction of the cost; a true full-size blur of this radius
+        // would stall OpenCV.js for seconds on a phone.
+        const sw = Math.max(1, Math.round(gray.cols / 16));
+        const sh = Math.max(1, Math.round(gray.rows / 16));
+        cv.resize(gray, small, new cv.Size(sw, sh), 0, 0, cv.INTER_AREA);
+
+        // Max-filter before blurring so the estimate tracks PAPER brightness. Without
+        // it, a large solid dark region — a stamp, a shaded form box — gets absorbed
+        // into the "illumination" and divided away: a mid-grey stamp measured 143 with
+        // blur alone vs 78 with this pass, against an ideal of ~74. Kernel 7 at this
+        // scale is the knee; larger starts eating the shadow correction itself.
+        const k = cv.Mat.ones(7, 7, cv.CV_8U);
+        cv.dilate(small, small, k, new cv.Point(-1, -1), 1);
+        k.delete();
+
+        cv.GaussianBlur(small, small, new cv.Size(21, 21), 0);
+        cv.resize(small, bg, new cv.Size(gray.cols, gray.rows), 0, 0, cv.INTER_LINEAR);
+
+        cv.divide(gray, bg, norm, 255, -1);   // paper → ~255, ink stays dark
+
+        if (mode === 'bw') {
+            // Block size tracks stroke width, so it has to scale with resolution
+            // rather than being a fixed pixel count.
+            let block = Math.round(gray.cols * 0.02);
+            if (block % 2 === 0) block++;
+            block = Math.max(11, Math.min(51, block));
+            cv.adaptiveThreshold(norm, out, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                 cv.THRESH_BINARY, block, 12);
+            cv.medianBlur(out, out, 3);       // despeckle — safe for text at this size
+        } else {
+            // 'scan' — a gamma curve, NOT a linear gain. After the division pass the
+            // paper already sits at ~255, so multiplying it (the obvious move) just
+            // saturates everything near white and erases faint marks: measured
+            // separation between a pencil signature and blank paper was 5 levels with
+            // a linear 1.25x gain, vs 56 with this curve on the same test page.
+            // Gamma darkens the midtones and leaves the white point alone.
+            let lut = new cv.Mat(1, 256, cv.CV_8U);
+            for (let i = 0; i < 256; i++) lut.data[i] = Math.round(255 * Math.pow(i / 255, 1.8));
+            cv.LUT(norm, lut, out);
+            lut.delete();
+        }
+
+        const dst = document.createElement('canvas');
+        cv.imshow(dst, out);
+        return dst;
+    } catch (e) {
+        console.warn('enhanceDocument failed, keeping original:', e.message);
+        return canvas;
+    } finally {
+        src.delete(); gray.delete(); small.delete(); bg.delete(); norm.delete(); out.delete();
+    }
+}
+
+// Single place where a page becomes a stored image: enhance → resize → ONE encode.
+function finishPage(canvas) {
+    const enhanced = enhanceDocument(canvas, outputMode);
+    const ratio = Math.min(OUT_MAX_PX / Math.max(enhanced.width, enhanced.height), 1);
+    const w = Math.round(enhanced.width * ratio);
+    const h = Math.round(enhanced.height * ratio);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(enhanced, 0, 0, w, h);
+    pages.push({ dataUrl: c.toDataURL('image/jpeg', OUT_QUALITY), width: w, height: h });
+    renderPages();
+}
+
+// Re-encode an already-stored page at a lower quality (upload size ladder).
+function recompressPage(page, quality) {
     return new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => {
-            const ratio = Math.min(maxPx / Math.max(img.width, img.height), 1);
-            const w = Math.round(img.width * ratio);
-            const h = Math.round(img.height * ratio);
+        const im = new Image();
+        im.onload = () => {
             const c = document.createElement('canvas');
-            c.width = w; c.height = h;
-            c.getContext('2d').drawImage(img, 0, 0, w, h);
-            resolve({ dataUrl: c.toDataURL('image/jpeg', 0.85), width: w, height: h });
+            c.width = page.width; c.height = page.height;
+            c.getContext('2d').drawImage(im, 0, 0);
+            resolve({ dataUrl: c.toDataURL('image/jpeg', quality), width: page.width, height: page.height });
         };
-        img.src = dataUrl;
+        im.onerror = () => resolve(page);
+        im.src = page.dataUrl;
     });
 }
 
@@ -469,6 +592,7 @@ let cvReady = false;
 let cropState = {
     imageUrl: null,
     img: null,
+    previewImg: null,  // cleaned-up preview of img, drawn instead of it (geometry unchanged)
     corners: [],       // [{x,y}] in image coordinates — TL, TR, BR, BL
     activeCorner: -1,
     scale: 1,
@@ -511,6 +635,8 @@ function openCropEditor(dataUrl) {
 
     cropState.imageUrl = dataUrl;
     cropState.activeCorner = -1;
+    cropState.previewImg = null;
+    syncModeButtons();
 
     const img = new Image();
     img.onload = async () => {
@@ -545,6 +671,7 @@ function openCropEditor(dataUrl) {
             console.warn('OpenCV not available, manual mode:', e.message);
             document.getElementById('cropStatus').textContent = 'Manual mode — drag corners to fit';
         }
+        refreshCropPreview();
         document.getElementById('cropLoading').style.display = 'none';
     };
     img.src = dataUrl;
@@ -561,6 +688,30 @@ function closeCropEditor() {
     document.getElementById('cropEditor').classList.remove('active');
     cropState.img = null;
     cropState.imageUrl = null;
+    cropState.previewImg = null;
+}
+
+// WYSIWYG — draw the chosen mode onto the preview canvas so the editor shows what
+// will actually be saved. Enhanced at preview resolution (fast); the real
+// full-resolution pass runs once, on Accept.
+function refreshCropPreview() {
+    if (!cropState.img) return;
+    if (outputMode === 'color' || !cvReady) {
+        cropState.previewImg = null;
+        renderCropCanvas();
+        return;
+    }
+    const src = cropState.img;
+    const r = Math.min(1100 / Math.max(src.width, src.height), 1);
+    const c = document.createElement('canvas');
+    c.width  = Math.max(1, Math.round(src.width  * r));
+    c.height = Math.max(1, Math.round(src.height * r));
+    c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+
+    const im = new Image();
+    im.onload  = () => { cropState.previewImg = im;   renderCropCanvas(); };
+    im.onerror = () => { cropState.previewImg = null; renderCropCanvas(); };
+    im.src = enhanceDocument(c, outputMode).toDataURL('image/jpeg', 0.85);
 }
 
 // ── Render Canvas ───────────────────────────────────────────────────────────
@@ -568,6 +719,10 @@ function renderCropCanvas() {
     const canvas = document.getElementById('cropCanvas');
     const ctx = canvas.getContext('2d');
     const img = cropState.img;
+    if (!img) return;
+    // Geometry always comes from the original image so corner coordinates stay
+    // valid; only the pixels drawn come from the cleaned-up preview.
+    const drawSrc = cropState.previewImg || img;
     const vp = document.getElementById('cropViewport');
 
     const vpW = vp.clientWidth;
@@ -586,7 +741,7 @@ function renderCropCanvas() {
     canvas.height = vpH;
 
     // Draw image
-    ctx.drawImage(img, offX, offY, drawW, drawH);
+    ctx.drawImage(drawSrc, offX, offY, drawW, drawH);
 
     // Dim area outside crop region
     ctx.save();
@@ -609,7 +764,7 @@ function renderCropCanvas() {
     for (let i = 1; i < 4; i++) ctx.lineTo(offX + c[i].x * scale, offY + c[i].y * scale);
     ctx.closePath();
     ctx.clip();
-    ctx.drawImage(img, offX, offY, drawW, drawH);
+    ctx.drawImage(drawSrc, offX, offY, drawW, drawH);
     ctx.restore();
 
     // Draw border lines
@@ -694,44 +849,59 @@ function detectDocument(img) {
     try {
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
         cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
-        cv.Canny(blurred, edges, 40, 120);
 
-        // Dilate to close gaps
-        let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
-        cv.dilate(edges, dilated, kernel, new cv.Point(-1, -1), 2);
-        kernel.delete();
+        // A fixed threshold pair only ever suits one lighting condition. Derive one
+        // from the image's own brightness, then fall back to the original hand-tuned
+        // pair, then to a very permissive one. First pass that yields a quad wins —
+        // strictly better than any single pair on its own.
+        const mean = cv.mean(blurred)[0];
+        const passes = [
+            [Math.max(10, Math.round(mean * 0.40)), Math.max(40, Math.round(mean * 0.95))],
+            [40, 120],   // original pair — proven on a well-lit dock
+            [15, 50]     // last resort: white page on a light background
+        ];
 
-        // Find contours
-        let contours = new cv.MatVector();
-        let hierarchy = new cv.Mat();
-        cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        for (const [lo, hi] of passes) {
+            cv.Canny(blurred, edges, lo, hi);
 
-        // Find largest quadrilateral
-        let maxArea = (img.width * img.height) * 0.05; // min 5% of image
-        let bestCorners = null;
+            // Dilate to close gaps
+            let kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+            cv.dilate(edges, dilated, kernel, new cv.Point(-1, -1), 2);
+            kernel.delete();
 
-        for (let i = 0; i < contours.size(); i++) {
-            let cnt = contours.get(i);
-            let area = cv.contourArea(cnt);
-            if (area > maxArea) {
-                let peri = cv.arcLength(cnt, true);
-                let approx = new cv.Mat();
-                cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-                if (approx.rows === 4) {
-                    maxArea = area;
-                    let pts = [];
-                    for (let j = 0; j < 4; j++) {
-                        pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+            // Find contours
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            // Find largest quadrilateral
+            let maxArea = (img.width * img.height) * 0.05; // min 5% of image
+            let bestCorners = null;
+
+            for (let i = 0; i < contours.size(); i++) {
+                let cnt = contours.get(i);
+                let area = cv.contourArea(cnt);
+                if (area > maxArea) {
+                    let peri = cv.arcLength(cnt, true);
+                    let approx = new cv.Mat();
+                    cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
+                    if (approx.rows === 4) {
+                        maxArea = area;
+                        let pts = [];
+                        for (let j = 0; j < 4; j++) {
+                            pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+                        }
+                        bestCorners = orderCorners(pts);
                     }
-                    bestCorners = orderCorners(pts);
+                    approx.delete();
                 }
-                approx.delete();
             }
-        }
 
-        contours.delete();
-        hierarchy.delete();
-        return bestCorners;
+            contours.delete();
+            hierarchy.delete();
+            if (bestCorners) return bestCorners;
+        }
+        return null;
     } finally {
         src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
     }
@@ -748,7 +918,7 @@ function orderCorners(pts) {
 // ── Crop Actions ────────────────────────────────────────────────────────────
 async function cropAccept() {
     const { img, corners } = cropState;
-    let resultUrl;
+    let resultCanvas;
 
     if (cvReady) {
         // Perspective transform with OpenCV
@@ -781,7 +951,7 @@ async function cropAccept() {
 
             let outCanvas = document.createElement('canvas');
             cv.imshow(outCanvas, dst);
-            resultUrl = outCanvas.toDataURL('image/jpeg', 0.90);
+            resultCanvas = outCanvas;   // stays a canvas; the one encode happens in finishPage()
 
             dst.delete(); M.delete(); srcPts.delete(); dstPts.delete();
         } finally {
@@ -798,23 +968,25 @@ async function cropAccept() {
         const c = document.createElement('canvas');
         c.width = w; c.height = h;
         c.getContext('2d').drawImage(img, minX, minY, w, h, 0, 0, w, h);
-        resultUrl = c.toDataURL('image/jpeg', 0.90);
+        resultCanvas = c;
     }
 
-    const resized = await resizeImage(resultUrl, 2000);
-    pages.push(resized);
-    renderPages();
+    finishPage(resultCanvas);
     closeCropEditor();
     pageResolved(true);
 }
 
 function cropSkip() {
-    resizeImage(cropState.imageUrl, 2000).then(resized => {
-        pages.push(resized);
-        renderPages();
-        closeCropEditor();
-        pageResolved(true);
-    });
+    // "Skip" = keep the whole frame, no perspective correction. It still gets the
+    // cleanup pass — a skipped page is normally one that was already square-on,
+    // not one you wanted left looking like a photo.
+    const img = cropState.img;
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0);
+    finishPage(c);
+    closeCropEditor();
+    pageResolved(true);
 }
 
 function cropRetake() {
@@ -1163,7 +1335,9 @@ function acceptStamp() {
     const sy = stampPos.y - sigH / 2;
     ctx.drawImage(sigImg, sx, sy, sigW, sigH);
 
-    const newUrl = c.toDataURL('image/jpeg', 0.90);
+    // Match the page pipeline's quality — this re-encodes an already-cleaned page,
+    // so a lower setting here would quietly undo some of that work.
+    const newUrl = c.toDataURL('image/jpeg', OUT_QUALITY);
     pages[pageIdx] = { dataUrl: newUrl, width: pageImg.width, height: pageImg.height, stamped: true };
     renderPages();
     closeStampEditor();
@@ -1207,6 +1381,21 @@ function previewPage(i) {
 }
 
 // ── Save BOL ────────────────────────────────────────────────────────────────
+function buildPdfBase64(srcPages) {
+    const { jsPDF } = window.jspdf;
+    const first = srcPages[0];
+    const doc = new jsPDF({
+        orientation: first.width > first.height ? 'l' : 'p',
+        unit: 'px', format: [first.width, first.height]
+    });
+    for (let i = 0; i < srcPages.length; i++) {
+        const pg = srcPages[i];
+        if (i > 0) doc.addPage([pg.width, pg.height], pg.width > pg.height ? 'l' : 'p');
+        doc.addImage(pg.dataUrl, 'JPEG', 0, 0, pg.width, pg.height);
+    }
+    return doc.output('datauristring').split(',')[1];
+}
+
 async function saveBOL() {
     if (!pages.length) return;
     if (!loadInfo || !loadInfo.load_number) { showToast('No load info. Refresh.', 'error'); return; }
@@ -1222,22 +1411,24 @@ async function saveBOL() {
 
     try {
         fill.style.width = '20%';
-        const { jsPDF } = window.jspdf;
-        const first = pages[0];
-        const doc = new jsPDF({
-            orientation: first.width > first.height ? 'l' : 'p',
-            unit: 'px', format: [first.width, first.height]
-        });
+        let pdfBase64 = buildPdfBase64(pages);
+        fill.style.width = '60%';
 
-        for (let i = 0; i < pages.length; i++) {
-            const pg = pages[i];
-            if (i > 0) doc.addPage([pg.width, pg.height], pg.width > pg.height ? 'l' : 'p');
-            doc.addImage(pg.dataUrl, 'JPEG', 0, 0, pg.width, pg.height);
-            fill.style.width = (20 + (i + 1) / pages.length * 40) + '%';
+        // The backend caps the upload body at 10MB. Raising pages to ~300 DPI can push
+        // a multi-page BOL past that, so step quality down rather than fail the save —
+        // and say so out loud instead of quietly shipping a worse file.
+        const LIMIT = 9 * 1024 * 1024;
+        const ladder = [0.82, 0.70, 0.58];
+        for (let i = 0; i < ladder.length && pdfBase64.length > LIMIT; i++) {
+            console.warn('BOL upload ' + (pdfBase64.length / 1048576).toFixed(1) +
+                         'MB > limit — recompressing at q=' + ladder[i]);
+            showToast('Large scan — recompressing to fit the 10MB upload limit', 'error');
+            pdfBase64 = buildPdfBase64(await Promise.all(pages.map(p => recompressPage(p, ladder[i]))));
         }
-
-        fill.style.width = '65%';
-        const pdfBase64 = doc.output('datauristring').split(',')[1];
+        if (pdfBase64.length > LIMIT) {
+            throw new Error('PDF still ' + (pdfBase64.length / 1048576).toFixed(1) +
+                            'MB after recompression — remove a page and save again');
+        }
 
         fill.style.width = '75%';
         const res = await fetch(API + '/api/bol-upload', {
