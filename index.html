@@ -637,15 +637,27 @@ function finishPage(canvas) {
     renderPages();
 }
 
-// Re-encode an already-stored page at a lower quality (upload size ladder).
-function recompressPage(page, quality) {
+// Re-encode a stored page for the upload size ladder. `maxPx` optionally
+// downscales the longest edge — the only lever that actually rescues a
+// page-heavy document, since quality alone cannot fold 11 pages at 2550px under
+// the cap at ANY setting. Always re-derives from the STORED page, never from a
+// previous rung's output, so walking down the ladder costs one re-encode rather
+// than N stacked ones.
+function recompressPage(page, quality, maxPx) {
     return new Promise((resolve) => {
         const im = new Image();
         im.onload = () => {
+            const ratio = maxPx ? Math.min(maxPx / Math.max(page.width, page.height), 1) : 1;
+            const w = Math.max(1, Math.round(page.width  * ratio));
+            const h = Math.max(1, Math.round(page.height * ratio));
             const c = document.createElement('canvas');
-            c.width = page.width; c.height = page.height;
-            c.getContext('2d').drawImage(im, 0, 0);
-            resolve({ dataUrl: c.toDataURL('image/jpeg', quality), width: page.width, height: page.height });
+            c.width = w; c.height = h;
+            const ctx = c.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(im, 0, 0, w, h);
+            resolve({ dataUrl: c.toDataURL('image/jpeg', quality), width: w, height: h,
+                      stamped: page.stamped });
         };
         im.onerror = () => resolve(page);
         im.src = page.dataUrl;
@@ -1536,20 +1548,58 @@ async function saveBOL() {
         let pdfBase64 = buildPdfBase64(pages);
         fill.style.width = '60%';
 
-        // The backend caps the upload body at 10MB. Raising pages to ~300 DPI can push
-        // a multi-page BOL past that, so step quality down rather than fail the save —
-        // and say so out loud instead of quietly shipping a worse file.
+        // The backend caps the upload body at 10MB, and pages are stored at ~300 DPI
+        // (OUT_MAX_PX 2550) for BOL fine print. QUALITY-ONLY rungs come first so a
+        // small scan keeps full resolution; past that we drop PIXELS, because for a
+        // page-heavy document quality alone can NEVER fit — an 11-page POD at 2550px
+        // does not fold under 9MB at any JPEG setting, which is exactly how load
+        // 0332344's POD failed to save at all (2026-08-12).
+        //
+        // The cap deliberately stays at 10MB rather than being raised: Gmail caps a
+        // whole packet at 25MB, and a load already ships BOL + 2 PODs + invoice +
+        // rate con. Raising it would just move the failure to the broker email.
         const LIMIT = 9 * 1024 * 1024;
-        const ladder = [0.82, 0.70, 0.58];
-        for (let i = 0; i < ladder.length && pdfBase64.length > LIMIT; i++) {
-            console.warn('BOL upload ' + (pdfBase64.length / 1048576).toFixed(1) +
-                         'MB > limit — recompressing at q=' + ladder[i]);
-            showToast('Large scan — recompressing to fit the 10MB upload limit', 'error');
-            pdfBase64 = buildPdfBase64(await Promise.all(pages.map(p => recompressPage(p, ladder[i]))));
+        const ladder = [
+            { q: 0.82, px: null },   // full 300 DPI
+            { q: 0.72, px: null },
+            { q: 0.80, px: 2100 },
+            { q: 0.75, px: 1800 },
+            { q: 0.70, px: 1600 },   // BOL floor — below this fine print suffers
+        ].concat(docTarget.doc_type === 'POD' ? [
+            // PODs are signature/stamp pages, not fine print, so they tolerate a
+            // lower floor. pod_watcher renders the same 11 photos to 2.8MB at
+            // A4/150dpi, so there is plenty of room here.
+            { q: 0.68, px: 1350 },
+            { q: 0.62, px: 1100 },
+        ] : []);
+
+        // Quality-only rungs are wasted work when the scan is wildly over: at 2550px
+        // a page-heavy document bottoms out near 2x the cap at ANY JPEG setting
+        // (measured — 11 photo-heavy pages still totalled 17.6MB at q0.58 full-res).
+        // Jump straight to the resolution rungs rather than burn ~22 full-res
+        // re-encodes on the phone to land nowhere.
+        const firstPxRung = ladder.findIndex(r => r.px);
+        const startAt = (pdfBase64.length > LIMIT * 2 && firstPxRung > 0) ? firstPxRung : 0;
+
+        let usedRung = null;
+        for (let i = startAt; i < ladder.length && pdfBase64.length > LIMIT; i++) {
+            const rung = ladder[i];
+            console.warn('upload ' + (pdfBase64.length / 1048576).toFixed(1) +
+                         'MB > limit — retrying at q=' + rung.q + (rung.px ? ' @' + rung.px + 'px' : ''));
+            showToast('Large scan — recompressing' + (rung.px ? ' at lower resolution' : ''), 'error');
+            pdfBase64 = buildPdfBase64(await Promise.all(
+                pages.map(p => recompressPage(p, rung.q, rung.px))));
+            usedRung = rung;
         }
         if (pdfBase64.length > LIMIT) {
-            throw new Error('PDF still ' + (pdfBase64.length / 1048576).toFixed(1) +
-                            'MB after recompression — remove a page and save again');
+            // Never tell him to "remove a page" — every POD page is required
+            // paperwork and a BOL must come back with all its numbered pages.
+            const advice = docTarget.doc_type === 'POD'
+                ? 'drop the photos into pod_inbox/' + loadInfo.load_number + '/' +
+                  (docTarget.drop ? 'drop' + docTarget.drop + '/' : '') + ' instead'
+                : 'switch to B&W mode and save again — it is far smaller';
+            throw new Error('Still ' + (pdfBase64.length / 1048576).toFixed(1) +
+                            'MB after downscaling — ' + advice);
         }
 
         fill.style.width = '75%';
@@ -1564,11 +1614,20 @@ async function saveBOL() {
         });
 
         fill.style.width = '95%';
+        // A 413 is returned before the handler ever logs, so a silent failure here
+        // leaves NO server-side trace — say plainly what happened.
+        if (res.status === 413) {
+            throw new Error('Server rejected the upload as too large (413) — ' +
+                            'report this, the size ladder should have prevented it');
+        }
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
         fill.style.width = '100%';
-        showToast((data.versioned ? 'Saved new version (kept the old): ' : 'Saved: ') + data.filename, 'success');
+        // Never quietly ship a lower-resolution scan — say it landed reduced.
+        const shrunk = usedRung && usedRung.px ? ' (reduced to ' + usedRung.px + 'px to fit)' : '';
+        showToast((data.versioned ? 'Saved new version (kept the old): ' : 'Saved: ') +
+                  data.filename + shrunk, 'success');
         pages = [];
         renderPages();
     } catch (e) {
