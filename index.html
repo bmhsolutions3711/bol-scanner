@@ -61,6 +61,9 @@ body {
 .page-thumb .page-num { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.7); color: var(--gold); font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
 .page-thumb .page-remove { position: absolute; top: 4px; right: 4px; background: rgba(239,68,68,0.85); color: #fff; border: none; border-radius: 50%; width: 22px; height: 22px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .page-thumb .page-stamp { position: absolute; bottom: 4px; right: 4px; background: rgba(229,181,36,0.9); color: #1a1a2e; border: none; border-radius: 50%; width: 28px; height: 28px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-weight: 700; }
+.doc-targets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.doc-targets .doc-btn { flex: 1 1 auto; min-width: 88px; padding: 9px 8px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); font-size: 12px; font-weight: 600; cursor: pointer; }
+.doc-targets .doc-btn.active { background: var(--gold); border-color: var(--gold); color: #1a1a2e; }
 .page-thumb .page-move { position: absolute; bottom: 4px; background: rgba(0,0,0,0.72); color: var(--gold); border: none; border-radius: 50%; width: 26px; height: 26px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-weight: 700; }
 .page-thumb .page-move.left { left: 4px; }
 .page-thumb .page-move.right { left: 34px; }
@@ -199,6 +202,9 @@ body {
     <div class="route" id="loadRoute"></div>
     <span class="status loading" id="loadStatus">Fetching load...</span>
     <select id="loadSelect" class="load-select" style="display:none" onchange="selectLoad(this.value)" aria-label="Choose which load to file into"></select>
+    <!-- Multi-drop only. Hidden entirely on single-stop loads so the normal case
+         keeps zero extra taps. Populated by renderDocTargets(). -->
+    <div class="doc-targets" id="docTargets" style="display:none" role="group" aria-label="What are you scanning?"></div>
     <div class="load-manual">
         <input id="manualLoad" class="load-manual-input" type="text" inputmode="numeric"
                placeholder="Other load # (not listed)" aria-label="File to a load number not in the list">
@@ -348,6 +354,58 @@ function selectLoad(idx) {
     const s = document.getElementById('loadStatus');
     s.className = 'status ' + (loadInfo.folder_exists ? 'ok' : 'warn');
     s.textContent = loadInfo.folder_exists ? 'Folder ready' : 'Folder not found';
+    renderDocTargets();
+}
+
+// ── Multi-drop targets ──────────────────────────────────────────────────────
+// One BOL can cover several stops, and each stop has its OWN signed POD. The
+// broker needs them filed separately — merged into one document they can't be
+// matched to a drop. Single-stop loads (drop_count 1, or no sidecar at all) see
+// nothing here and behave exactly as before.
+let docTarget = { doc_type: 'BOL', drop: null };
+
+function renderDocTargets() {
+    const box = document.getElementById('docTargets');
+    const drops = (loadInfo && loadInfo.drops) || [];
+    if (!loadInfo || (loadInfo.drop_count || 1) < 2 || !drops.length) {
+        docTarget = { doc_type: 'BOL', drop: null };   // legacy single-doc behaviour
+        box.style.display = 'none';
+        box.innerHTML = '';
+        return;
+    }
+    // The BOL stays ONE combined document (all sequentially numbered pages);
+    // only the PODs split by drop.
+    const targets = [{ doc_type: 'BOL', drop: null, label: 'BOL (all pages)' }].concat(
+        drops.map(d => ({ doc_type: 'POD', drop: d.seq, label: 'POD Drop ' + d.seq + ' · ' + d.label }))
+    );
+    docTarget = targets[0];
+    box.innerHTML = targets.map((t, i) =>
+        '<button type="button" class="doc-btn' + (i === 0 ? ' active' : '') +
+        '" onclick="setDocTarget(' + i + ')">' + t.label + '</button>').join('');
+    box._targets = targets;
+    box.style.display = 'flex';
+}
+
+function setDocTarget(i) {
+    const box = document.getElementById('docTargets');
+    const t = box._targets && box._targets[i];
+    if (!t) return;
+    docTarget = t;
+    Array.from(box.children).forEach((b, n) => b.classList.toggle('active', n === i));
+    syncSaveBtn();
+}
+
+// The Save button says what it will actually file, so a POD can't be saved
+// believing it's the BOL.
+function saveBtnLabel() {
+    return '💾 Save ' + (docTarget.drop
+        ? (docTarget.doc_type + ' Drop ' + docTarget.drop)
+        : (docTarget.doc_type || 'BOL'));
+}
+
+function syncSaveBtn() {
+    const b = document.getElementById('saveBtn');
+    if (b) b.textContent = saveBtnLabel();
 }
 
 // File into a load that ISN'T in the picker (e.g. just delivered, not logged in
@@ -368,6 +426,9 @@ function useManualLoad() {
     s.textContent = 'Filing to load #' + ln + ' — check the toast after saving';
     const sel = document.getElementById('loadSelect');
     if (sel) sel.selectedIndex = -1;
+    // Manual entry has no folder_path, so no sidecar is resolvable — fall back to
+    // the single-doc path rather than leave a stale drop selected from a prior load.
+    renderDocTargets();
 }
 
 // ── Camera ──────────────────────────────────────────────────────────────────
@@ -1495,7 +1556,10 @@ async function saveBOL() {
         const res = await fetch(API + '/api/bol-upload', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pdf: pdfBase64, load_number: loadInfo.load_number, folder_path: loadInfo.folder_path || '' }),
+            body: JSON.stringify({ pdf: pdfBase64, load_number: loadInfo.load_number,
+                                   folder_path: loadInfo.folder_path || '',
+                                   doc_type: docTarget.doc_type,
+                                   drop: docTarget.drop }),
             signal: AbortSignal.timeout(30000)
         });
 
@@ -1511,7 +1575,7 @@ async function saveBOL() {
         showToast('Save failed: ' + (e.message || 'Unknown'), 'error');
     } finally {
         saveBtn.disabled = pages.length === 0;
-        saveBtn.textContent = '\uD83D\uDCBE Save BOL';
+        saveBtn.textContent = saveBtnLabel();
         setTimeout(() => { bar.style.display = 'none'; fill.style.width = '0%'; }, 1500);
     }
 }
