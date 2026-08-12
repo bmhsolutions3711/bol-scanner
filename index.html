@@ -61,6 +61,10 @@ body {
 .page-thumb .page-num { position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.7); color: var(--gold); font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; }
 .page-thumb .page-remove { position: absolute; top: 4px; right: 4px; background: rgba(239,68,68,0.85); color: #fff; border: none; border-radius: 50%; width: 22px; height: 22px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .page-thumb .page-stamp { position: absolute; bottom: 4px; right: 4px; background: rgba(229,181,36,0.9); color: #1a1a2e; border: none; border-radius: 50%; width: 28px; height: 28px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-weight: 700; }
+.page-thumb .page-move { position: absolute; bottom: 4px; background: rgba(0,0,0,0.72); color: var(--gold); border: none; border-radius: 50%; width: 26px; height: 26px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-weight: 700; }
+.page-thumb .page-move.left { left: 4px; }
+.page-thumb .page-move.right { left: 34px; }
+.page-thumb .page-move:disabled { opacity: 0.25; pointer-events: none; }
 .page-thumb.stamped { border-color: var(--gold); }
 .empty-state { text-align: center; padding: 24px; color: var(--text-dim); font-size: 13px; border: 2px dashed var(--border); border-radius: 10px; }
 
@@ -122,6 +126,7 @@ body {
 }
 .mode-btn.active { border-color: var(--gold); color: var(--gold); background: var(--gold-dim); }
 .crop-actions .btn { flex: 1; padding: 14px; font-size: 15px; }
+.crop-actions .crop-rotate { flex: 0 0 54px; font-size: 20px; padding: 14px 0; }
 .crop-loading {
     position: absolute; inset: 0; display: flex;
     align-items: center; justify-content: center;
@@ -242,6 +247,7 @@ body {
     </div>
     <div class="crop-actions">
         <button class="btn btn-clear" id="cropRetakeBtn" onclick="cropRetake()">Retake</button>
+        <button class="btn btn-clear crop-rotate" onclick="cropRotate()" title="Rotate 90&deg;">&#8635;</button>
         <button class="btn btn-scan" onclick="cropSkip()">Skip</button>
         <button class="btn btn-save" onclick="cropAccept()">Accept</button>
     </div>
@@ -591,6 +597,8 @@ function recompressPage(page, quality) {
 let cvReady = false;
 let cropState = {
     imageUrl: null,
+    originalUrl: null, // pristine capture — rotation always re-derives from THIS
+    rotation: 0,       // 0/90/180/270, applied to originalUrl
     img: null,
     previewImg: null,  // cleaned-up preview of img, drawn instead of it (geometry unchanged)
     corners: [],       // [{x,y}] in image coordinates — TL, TR, BR, BL
@@ -629,10 +637,16 @@ function loadOpenCV() {
 }
 
 // ── Open Crop Editor ────────────────────────────────────────────────────────
-function openCropEditor(dataUrl) {
+function openCropEditor(dataUrl, keepRotation) {
     const editor = document.getElementById('cropEditor');
     editor.classList.add('active');
 
+    // A fresh capture resets rotation and becomes the pristine source. Re-entry
+    // from cropRotate() passes keepRotation so the angle survives the reload.
+    if (!keepRotation) {
+        cropState.originalUrl = dataUrl;
+        cropState.rotation    = 0;
+    }
     cropState.imageUrl = dataUrl;
     cropState.activeCorner = -1;
     cropState.previewImg = null;
@@ -684,10 +698,43 @@ function openCropEditor(dataUrl) {
     canvas.onpointercancel = cropPointerUp;
 }
 
+// Rotate the page 90° clockwise, BEFORE it is accepted.
+//
+// Always re-derives from cropState.originalUrl rather than turning the image
+// already on screen: rotating the rotated result would stack a JPEG re-encode
+// per 90°, so a 270° turn would be three generations of loss on paperwork whose
+// fine print (PRO numbers, handwritten seal numbers) is the whole point.
+//
+// Re-enters openCropEditor so edge detection runs again — the corner
+// coordinates are defined against the source orientation and are meaningless
+// once the pixels turn.
+function cropRotate() {
+    if (!cropState.originalUrl) return;
+    cropState.rotation = (cropState.rotation + 90) % 360;
+
+    const base = new Image();
+    base.onload = () => {
+        const rot = cropState.rotation;
+        if (!rot) { openCropEditor(cropState.originalUrl, true); return; }
+        const swap = (rot === 90 || rot === 270);
+        const c = document.createElement('canvas');
+        c.width  = swap ? base.height : base.width;
+        c.height = swap ? base.width  : base.height;
+        const ctx = c.getContext('2d');
+        ctx.translate(c.width / 2, c.height / 2);
+        ctx.rotate(rot * Math.PI / 180);
+        ctx.drawImage(base, -base.width / 2, -base.height / 2);
+        openCropEditor(c.toDataURL('image/jpeg', 0.95), true);
+    };
+    base.src = cropState.originalUrl;
+}
+
 function closeCropEditor() {
     document.getElementById('cropEditor').classList.remove('active');
     cropState.img = null;
     cropState.imageUrl = null;
+    cropState.originalUrl = null;
+    cropState.rotation = 0;
     cropState.previewImg = null;
 }
 
@@ -1362,6 +1409,10 @@ function renderPages() {
             + '<img src="' + pg.dataUrl + '" alt="Page ' + (i+1) + '">'
             + '<span class="page-num">' + (i+1) + '</span>'
             + '<button class="page-remove" onclick="event.stopPropagation();removePage(' + i + ')">&#x2715;</button>'
+            + '<button class="page-move left" onclick="event.stopPropagation();movePage(' + i + ',-1)" title="Move earlier"'
+            + (i === 0 ? ' disabled' : '') + '>&#8592;</button>'
+            + '<button class="page-move right" onclick="event.stopPropagation();movePage(' + i + ',1)" title="Move later"'
+            + (i === pages.length - 1 ? ' disabled' : '') + '>&#8594;</button>'
             + '<button class="page-stamp" onclick="event.stopPropagation();openStampEditor(' + i + ')" title="Add signature">&#9998;</button>'
             + '</div>';
     });
@@ -1369,6 +1420,16 @@ function renderPages() {
 }
 
 function removePage(i) { pages.splice(i, 1); renderPages(); }
+
+// Reorder pages. A multi-page BOL must go back to the broker in its printed
+// sequence — C Cross rejects BOLs with missing or altered page numbers — and a
+// camera-roll batch arrives in whatever order the picker hands over.
+function movePage(i, delta) {
+    const j = i + delta;
+    if (j < 0 || j >= pages.length) return;
+    [pages[i], pages[j]] = [pages[j], pages[i]];
+    renderPages();
+}
 function clearPages() { if (pages.length && confirm('Clear all?')) { pages = []; renderPages(); } }
 function previewPage(i) {
     const o = document.createElement('div');
