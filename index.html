@@ -357,27 +357,34 @@ function selectLoad(idx) {
     renderDocTargets();
 }
 
-// ── Multi-drop targets ──────────────────────────────────────────────────────
-// One BOL can cover several stops, and each stop has its OWN signed POD. The
-// broker needs them filed separately — merged into one document they can't be
-// matched to a drop. Single-stop loads (drop_count 1, or no sidecar at all) see
-// nothing here and behave exactly as before.
+// ── Doc targets ─────────────────────────────────────────────────────────────
+// Every load offers three targets (card #143): the BOL, the POD, and FREIGHT
+// PHOTOS. The machine never guesses what a picture IS — the selector is the
+// honest door. Multi-drop loads split the POD per stop (each stop has its OWN
+// signed POD; merged, the broker can't match them to a drop); single-drop
+// loads get one plain POD button — the door that used to exist only via the
+// Drive folder, whose sync wedges ate the 08-24 draft. FREIGHT PHOTOS batch
+// into ONE PDF like everything else (his ruling 08-24: one upload to the
+// broker, never a pile of jpgs) and file under photos/, off the invoice draft.
 let docTarget = { doc_type: 'BOL', drop: null };
 
 function renderDocTargets() {
     const box = document.getElementById('docTargets');
     const drops = (loadInfo && loadInfo.drops) || [];
-    if (!loadInfo || (loadInfo.drop_count || 1) < 2 || !drops.length) {
-        docTarget = { doc_type: 'BOL', drop: null };   // legacy single-doc behaviour
+    if (!loadInfo) {
+        docTarget = { doc_type: 'BOL', drop: null };
         box.style.display = 'none';
         box.innerHTML = '';
         return;
     }
     // The BOL stays ONE combined document (all sequentially numbered pages);
     // only the PODs split by drop.
-    const targets = [{ doc_type: 'BOL', drop: null, label: 'BOL (all pages)' }].concat(
-        drops.map(d => ({ doc_type: 'POD', drop: d.seq, label: 'POD Drop ' + d.seq + ' · ' + d.label }))
-    );
+    const multi = (loadInfo.drop_count || 1) >= 2 && drops.length;
+    const targets = [{ doc_type: 'BOL', drop: null, label: 'BOL (all pages)' }]
+        .concat(multi
+            ? drops.map(d => ({ doc_type: 'POD', drop: d.seq, label: 'POD Drop ' + d.seq + ' · ' + d.label }))
+            : [{ doc_type: 'POD', drop: null, label: 'POD' }])
+        .concat([{ doc_type: 'FreightPhotos', drop: null, label: 'FREIGHT PHOTOS' }]);
     docTarget = targets[0];
     box.innerHTML = targets.map((t, i) =>
         '<button type="button" class="doc-btn' + (i === 0 ? ' active' : '') +
@@ -398,9 +405,9 @@ function setDocTarget(i) {
 // The Save button says what it will actually file, so a POD can't be saved
 // believing it's the BOL.
 function saveBtnLabel() {
-    return '💾 Save ' + (docTarget.drop
-        ? (docTarget.doc_type + ' Drop ' + docTarget.drop)
-        : (docTarget.doc_type || 'BOL'));
+    const nice = docTarget.doc_type === 'FreightPhotos' ? 'Freight Photos'
+               : (docTarget.doc_type || 'BOL');
+    return '💾 Save ' + (docTarget.drop ? (nice + ' Drop ' + docTarget.drop) : nice);
 }
 
 function syncSaveBtn() {
@@ -1565,10 +1572,11 @@ async function saveBOL() {
             { q: 0.80, px: 2100 },
             { q: 0.75, px: 1800 },
             { q: 0.70, px: 1600 },   // BOL floor — below this fine print suffers
-        ].concat(docTarget.doc_type === 'POD' ? [
-            // PODs are signature/stamp pages, not fine print, so they tolerate a
-            // lower floor. pod_watcher renders the same 11 photos to 2.8MB at
-            // A4/150dpi, so there is plenty of room here.
+        ].concat(docTarget.doc_type === 'POD' || docTarget.doc_type === 'FreightPhotos' ? [
+            // PODs are signature/stamp pages and freight photos are photos —
+            // neither is fine print, so both tolerate a lower floor. pod_watcher
+            // renders the same 11 photos to 2.8MB at A4/150dpi, so there is
+            // plenty of room here.
             { q: 0.68, px: 1350 },
             { q: 0.62, px: 1100 },
         ] : []);
@@ -1597,6 +1605,8 @@ async function saveBOL() {
             const advice = docTarget.doc_type === 'POD'
                 ? 'drop the photos into pod_inbox/' + loadInfo.load_number + '/' +
                   (docTarget.drop ? 'drop' + docTarget.drop + '/' : '') + ' instead'
+                : docTarget.doc_type === 'FreightPhotos'
+                ? 'save in two smaller batches — each files as its own PDF beside the first'
                 : 'switch to B&W mode and save again — it is far smaller';
             throw new Error('Still ' + (pdfBase64.length / 1048576).toFixed(1) +
                             'MB after downscaling — ' + advice);
