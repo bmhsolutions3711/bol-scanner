@@ -1602,10 +1602,12 @@ async function saveBOL() {
         if (pdfBase64.length > LIMIT) {
             // Never tell him to "remove a page" — every POD page is required
             // paperwork and a BOL must come back with all its numbered pages.
-            const advice = docTarget.doc_type === 'POD'
-                ? 'drop the photos into pod_inbox/' + loadInfo.load_number + '/' +
-                  (docTarget.drop ? 'drop' + docTarget.drop + '/' : '') + ' instead'
-                : docTarget.doc_type === 'FreightPhotos'
+            /* pod_inbox retired 2026-08-25. PODs must NOT batch-split — a second
+               save would VERSION onto the first and the billing email attaches
+               only the latest. B&W is the honest shrink for them (signatures
+               survive it); freight photos batch-split safely (photos/ sits
+               outside the billing sweep). */
+            const advice = docTarget.doc_type === 'FreightPhotos'
                 ? 'save in two smaller batches — each files as its own PDF beside the first'
                 : 'switch to B&W mode and save again — it is far smaller';
             throw new Error('Still ' + (pdfBase64.length / 1048576).toFixed(1) +
