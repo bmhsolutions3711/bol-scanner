@@ -290,9 +290,26 @@ body {
 
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
-const API = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
-    ? 'http://localhost:8420'
-    : 'https://bryans-macbook-pro-1.tail1ed408.ts.net';
+// The API base is device-local config, never shipped in source: open the app
+// once with #api=<origin> to link a backend (stored, hash stripped), or
+// #api=off to unlink. No backend linked = scan works, saving is disabled.
+const API = (() => {
+    try {
+        const m = location.hash.match(/^#api=(.+)$/);
+        if (m) {
+            const v = decodeURIComponent(m[1]);
+            if (v === 'off') localStorage.removeItem('bol_api');
+            else localStorage.setItem('bol_api', v.replace(/\/+$/, ''));
+            history.replaceState(null, '', location.pathname + location.search);
+        }
+        return localStorage.getItem('bol_api') || '';
+    } catch (e) { return ''; }
+})();
+// A hash-only navigation onto an already-open page never re-runs the config
+// block above — reload so the link works even when the app is already open.
+window.addEventListener('hashchange', () => {
+    if (/^#api=/.test(location.hash)) location.reload();
+});
 
 let pages = [];
 let loadInfo = null;
@@ -305,6 +322,14 @@ async function fetchLoadInfo() {
     const brkEl = document.getElementById('loadBroker');
     const rteEl = document.getElementById('loadRoute');
     const statEl = document.getElementById('loadStatus');
+    if (!API) {
+        numEl.textContent = '---';
+        brkEl.textContent = 'No backend linked';
+        rteEl.textContent = '';
+        statEl.className = 'status warn';
+        statEl.textContent = 'Open with #api=<origin> to link';
+        return;
+    }
     statEl.className = 'status loading';
     statEl.textContent = 'Fetching load...';
     try {
@@ -358,13 +383,11 @@ function selectLoad(idx) {
 }
 
 // ── Doc targets ─────────────────────────────────────────────────────────────
-// Every load offers three targets (card #143): the BOL, the POD, and FREIGHT
-// PHOTOS. The machine never guesses what a picture IS — the selector is the
-// honest door. Multi-drop loads split the POD per stop (each stop has its OWN
-// signed POD; merged, the broker can't match them to a drop); single-drop
-// loads get one plain POD button — the door that used to exist only via the
-// Drive folder, whose sync wedges ate the 08-24 draft. FREIGHT PHOTOS batch
-// into ONE PDF like everything else (his ruling 08-24: one upload to the
+// Every load offers three targets: the BOL, the POD, and FREIGHT PHOTOS. The
+// machine never guesses what a picture IS — the selector is the honest door.
+// Multi-drop loads split the POD per stop (each stop has its OWN signed POD;
+// merged, the broker can't match them to a drop); single-drop loads get one
+// plain POD button. FREIGHT PHOTOS batch into ONE PDF (one upload to the
 // broker, never a pile of jpgs) and file under photos/, off the invoice draft.
 let docTarget = { doc_type: 'BOL', drop: null };
 
@@ -1559,8 +1582,8 @@ async function saveBOL() {
         // (OUT_MAX_PX 2550) for BOL fine print. QUALITY-ONLY rungs come first so a
         // small scan keeps full resolution; past that we drop PIXELS, because for a
         // page-heavy document quality alone can NEVER fit — an 11-page POD at 2550px
-        // does not fold under 9MB at any JPEG setting, which is exactly how load
-        // 0332344's POD failed to save at all (2026-08-12).
+        // does not fold under 9MB at any JPEG setting (measured on a real save
+        // that failed outright before this ladder existed).
         //
         // The cap deliberately stays at 10MB rather than being raised: Gmail caps a
         // whole packet at 25MB, and a load already ships BOL + 2 PODs + invoice +
@@ -1602,11 +1625,10 @@ async function saveBOL() {
         if (pdfBase64.length > LIMIT) {
             // Never tell him to "remove a page" — every POD page is required
             // paperwork and a BOL must come back with all its numbered pages.
-            /* pod_inbox retired 2026-08-25. PODs must NOT batch-split — a second
-               save would VERSION onto the first and the billing email attaches
-               only the latest. B&W is the honest shrink for them (signatures
-               survive it); freight photos batch-split safely (photos/ sits
-               outside the billing sweep). */
+            /* PODs must NOT batch-split — a second save would VERSION onto the
+               first and the billing email attaches only the latest. B&W is the
+               honest shrink for them (signatures survive it); freight photos
+               batch-split safely (photos/ sits outside the billing sweep). */
             const advice = docTarget.doc_type === 'FreightPhotos'
                 ? 'save in two smaller batches — each files as its own PDF beside the first'
                 : 'switch to B&W mode and save again — it is far smaller';
