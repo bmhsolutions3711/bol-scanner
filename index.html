@@ -48,6 +48,9 @@ body {
 .load-card .status.loading { background: var(--gold-dim); color: var(--gold); }
 .load-refresh { float: right; background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; padding: 4px; }
 .load-select { width: 100%; margin-top: 10px; padding: 9px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+.link-box { display: flex; gap: 8px; margin-top: 10px; }
+.link-box input { flex: 1; min-width: 0; padding: 10px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+.link-box .link-btn { padding: 10px 14px; background: var(--gold); color: #111; border: 1px solid var(--gold); border-radius: 8px; font-weight: 700; font-size: 13px; letter-spacing: .08em; }
 .load-manual { display: flex; gap: 8px; margin-top: 8px; }
 .load-manual-input { flex: 1; min-width: 0; padding: 9px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
 .load-manual-btn { flex: none; padding: 9px 16px; background: var(--gold-dim); color: var(--gold); border: 1px solid var(--gold); border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
@@ -202,6 +205,13 @@ body {
     <div class="route" id="loadRoute"></div>
     <span class="status loading" id="loadStatus">Fetching load...</span>
     <select id="loadSelect" class="load-select" style="display:none" onchange="selectLoad(this.value)" aria-label="Choose which load to file into"></select>
+    <!-- Un-linked state only (card #176): the backend origin is device-local
+         config, so the recovery control has to live where the man stands. -->
+    <div class="link-box" id="linkBox" style="display:none">
+        <input type="url" id="linkInput" inputmode="url" autocapitalize="none" autocomplete="off" spellcheck="false"
+               placeholder="https://your-mac.tailxxxx.ts.net" aria-label="Backend origin">
+        <button type="button" class="link-btn" onclick="linkBackend()">LINK</button>
+    </div>
     <!-- Multi-drop only. Hidden entirely on single-stop loads so the normal case
          keeps zero extra taps. Populated by renderDocTargets(). -->
     <div class="doc-targets" id="docTargets" style="display:none" role="group" aria-label="What are you scanning?"></div>
@@ -293,22 +303,100 @@ body {
 // The API base is device-local config, never shipped in source: open the app
 // once with #api=<origin> to link a backend (stored, hash stripped), or
 // #api=off to unlink. No backend linked = scan works, saving is disabled.
-const API = (() => {
+//
+// Card #176 (2026-09-03, "No backend linked" at a dock): localStorage alone is
+// one eviction or one wrong-browser tap from gone, so the origin now lives in
+// TWO places — localStorage (fast, synchronous read) and IndexedDB (the
+// survivor, with navigator.storage.persist() asked for on link). Boot reads
+// localStorage; if it is empty the IDB copy is recovered before the first
+// fetch. And the un-linked state grew a LINK control, because a hint about a
+// URL hash is not something a man with paperwork in his hand can act on.
+let API = '';
+const CFG_DB = 'bol-config', CFG_STORE = 'kv', CFG_KEY = 'api';
+function cfgDb() {
+    return new Promise((res, rej) => {
+        try {
+            const r = indexedDB.open(CFG_DB, 1);
+            r.onupgradeneeded = () => r.result.createObjectStore(CFG_STORE);
+            r.onsuccess = () => res(r.result);
+            r.onerror = () => rej(r.error);
+        } catch (e) { rej(e); }
+    });
+}
+function cfgGet(key) {
+    return cfgDb().then(db => new Promise((res, rej) => {
+        const t = db.transaction(CFG_STORE, 'readonly').objectStore(CFG_STORE).get(key);
+        t.onsuccess = () => res(t.result == null ? null : t.result);
+        t.onerror = () => rej(t.error);
+    })).catch(() => null);
+}
+function cfgPut(key, val) {
+    return cfgDb().then(db => new Promise((res, rej) => {
+        const st = db.transaction(CFG_STORE, 'readwrite').objectStore(CFG_STORE);
+        const t = val == null ? st.delete(key) : st.put(val, key);
+        t.onsuccess = () => res(true);
+        t.onerror = () => rej(t.error);
+    })).catch(() => false);
+}
+function normalizeOrigin(v) {
+    v = String(v || '').trim().replace(/\/+$/, '');
+    return /^https?:\/\/[^\s/]+$/i.test(v) ? v : '';
+}
+function setApi(v) {
+    const o = normalizeOrigin(v);
+    if (!o) return false;
+    API = o;
+    try { localStorage.setItem('bol_api', o); } catch (_) {}
+    cfgPut(CFG_KEY, o);
+    try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (_) {}
+    return true;
+}
+function clearApi() {
+    API = '';
+    try { localStorage.removeItem('bol_api'); } catch (_) {}
+    cfgPut(CFG_KEY, null);
+}
+// Boot: the hash wins, then localStorage, then the IDB survivor. CFG_READY
+// gates the first load-info fetch so a recovered link never flashes the
+// un-linked state first.
+const CFG_READY = (async () => {
     try {
         const m = location.hash.match(/^#api=(.+)$/);
         if (m) {
             const v = decodeURIComponent(m[1]);
-            if (v === 'off') localStorage.removeItem('bol_api');
-            else localStorage.setItem('bol_api', v.replace(/\/+$/, ''));
+            if (v === 'off') clearApi(); else setApi(v);
             history.replaceState(null, '', location.pathname + location.search);
         }
-        return localStorage.getItem('bol_api') || '';
-    } catch (e) { return ''; }
+        if (!API) { try { API = localStorage.getItem('bol_api') || ''; } catch (_) {} }
+        if (!API) {
+            const saved = await cfgGet(CFG_KEY);
+            if (saved) { API = saved; try { localStorage.setItem('bol_api', saved); } catch (_) {} }
+        } else {
+            cfgPut(CFG_KEY, API);   // an old localStorage-only link gains its survivor copy
+        }
+    } catch (e) { /* un-linked is a legal state; the LINK control handles it */ }
 })();
 // A hash-only navigation onto an already-open page never re-runs the config
 // block above — reload so the link works even when the app is already open.
 window.addEventListener('hashchange', () => {
     if (/^#api=/.test(location.hash)) location.reload();
+});
+// The LINK control (un-linked state): paste the origin, tap LINK.
+function linkBackend() {
+    const inp = document.getElementById('linkInput');
+    const statEl = document.getElementById('loadStatus');
+    if (!setApi(inp.value)) {
+        statEl.className = 'status warn';
+        statEl.textContent = 'That is not an origin — it looks like https://your-mac.tailxxxx.ts.net';
+        inp.focus();
+        return;
+    }
+    document.getElementById('linkBox').style.display = 'none';
+    fetchLoadInfo();
+}
+document.addEventListener('DOMContentLoaded', () => {
+    const inp = document.getElementById('linkInput');
+    if (inp) inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); linkBackend(); } });
 });
 
 let pages = [];
@@ -318,18 +406,22 @@ let installPrompt = null;
 
 // ── Load Info ───────────────────────────────────────────────────────────────
 async function fetchLoadInfo() {
+    await CFG_READY;   // never render un-linked before the survivor copy has been asked
     const numEl = document.getElementById('loadNum');
     const brkEl = document.getElementById('loadBroker');
     const rteEl = document.getElementById('loadRoute');
     const statEl = document.getElementById('loadStatus');
+    const linkBox = document.getElementById('linkBox');
     if (!API) {
         numEl.textContent = '---';
         brkEl.textContent = 'No backend linked';
         rteEl.textContent = '';
         statEl.className = 'status warn';
-        statEl.textContent = 'Open with #api=<origin> to link';
+        statEl.textContent = 'Paste your backend origin and tap LINK (or open with #api=<origin>)';
+        if (linkBox) linkBox.style.display = 'flex';
         return;
     }
+    if (linkBox) linkBox.style.display = 'none';
     statEl.className = 'status loading';
     statEl.textContent = 'Fetching load...';
     try {
@@ -438,8 +530,8 @@ function syncSaveBtn() {
     if (b) b.textContent = saveBtnLabel();
 }
 
-// File into a load that ISN'T in the picker (e.g. just delivered, not logged in
-// the sheet yet — the gap that left the Maysville load unfilable). No folder_path,
+// File into a load that ISN'T in the picker (e.g. just delivered, not yet
+// logged). No folder_path,
 // so the backend resolves the folder by exact load number and 404s loudly if it
 // doesn't exist — we never misfile silently.
 function useManualLoad() {
@@ -493,7 +585,7 @@ function handleRollSelect(event) {
     const files = Array.from(event.target.files || [])
         .filter(f => f.type.startsWith('image/'))
         // Camera filenames are timestamps (20260723_182810.jpg) so name order IS
-        // shot order — same convention pod_watcher uses to page a POD.
+        // shot order.
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     event.target.value = '';
 
@@ -1597,9 +1689,8 @@ async function saveBOL() {
             { q: 0.70, px: 1600 },   // BOL floor — below this fine print suffers
         ].concat(docTarget.doc_type === 'POD' || docTarget.doc_type === 'FreightPhotos' ? [
             // PODs are signature/stamp pages and freight photos are photos —
-            // neither is fine print, so both tolerate a lower floor. pod_watcher
-            // renders the same 11 photos to 2.8MB at A4/150dpi, so there is
-            // plenty of room here.
+            // neither is fine print, so both tolerate a lower floor (11 photos
+            // render to ~2.8MB at A4/150dpi — plenty of room).
             { q: 0.68, px: 1350 },
             { q: 0.62, px: 1100 },
         ] : []);
