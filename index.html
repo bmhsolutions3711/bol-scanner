@@ -49,8 +49,9 @@ body {
 .load-refresh { float: right; background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; padding: 4px; }
 .load-select { width: 100%; margin-top: 10px; padding: 9px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
 .link-box { display: flex; gap: 8px; margin-top: 10px; }
-.link-box input { flex: 1; min-width: 0; padding: 10px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
-.link-box .link-btn { padding: 10px 14px; background: var(--gold); color: #111; border: 1px solid var(--gold); border-radius: 8px; font-weight: 700; font-size: 13px; letter-spacing: .08em; }
+.link-box input { flex: 1; min-width: 0; min-height: 44px; padding: 10px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+.link-box .link-btn { flex: none; min-height: 44px; padding: 10px 16px; background: var(--gold); color: #111; border: 1px solid var(--gold); border-radius: 8px; font-weight: 700; font-size: 13px; letter-spacing: .08em; cursor: pointer; }
+.link-box .link-btn:active { transform: scale(0.97); }
 .load-manual { display: flex; gap: 8px; margin-top: 8px; }
 .load-manual-input { flex: 1; min-width: 0; padding: 9px 10px; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
 .load-manual-btn { flex: none; padding: 9px 16px; background: var(--gold-dim); color: var(--gold); border: 1px solid var(--gold); border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
@@ -203,13 +204,13 @@ body {
     <div class="load-num" id="loadNum">---</div>
     <div class="broker" id="loadBroker">Loading...</div>
     <div class="route" id="loadRoute"></div>
-    <span class="status loading" id="loadStatus">Fetching load...</span>
+    <span class="status loading" id="loadStatus" role="status" aria-live="polite">Fetching load...</span>
     <select id="loadSelect" class="load-select" style="display:none" onchange="selectLoad(this.value)" aria-label="Choose which load to file into"></select>
     <!-- Un-linked state only (card #176): the backend origin is device-local
          config, so the recovery control has to live where the man stands. -->
     <div class="link-box" id="linkBox" style="display:none">
         <input type="url" id="linkInput" inputmode="url" autocapitalize="none" autocomplete="off" spellcheck="false"
-               placeholder="https://your-mac.tailxxxx.ts.net" aria-label="Backend origin">
+               placeholder="https://your-mac.tailxxxx.ts.net" aria-label="Scanner server address" enterkeyhint="go">
         <button type="button" class="link-btn" onclick="linkBackend()">LINK</button>
     </div>
     <!-- Multi-drop only. Hidden entirely on single-stop loads so the normal case
@@ -302,45 +303,57 @@ body {
 // ── Config ──────────────────────────────────────────────────────────────────
 // The API base is device-local config, never shipped in source: open the app
 // once with #api=<origin> to link a backend (stored, hash stripped), or
-// #api=off to unlink. No backend linked = scan works, saving is disabled.
+// #api=off to unlink. No backend linked = scan works, saving is refused.
 //
 // Card #176 (2026-09-03, "No backend linked" at a dock): localStorage alone is
 // one eviction or one wrong-browser tap from gone, so the origin now lives in
 // TWO places — localStorage (fast, synchronous read) and IndexedDB (the
 // survivor, with navigator.storage.persist() asked for on link). Boot reads
 // localStorage; if it is empty the IDB copy is recovered before the first
-// fetch. And the un-linked state grew a LINK control, because a hint about a
-// URL hash is not something a man with paperwork in his hand can act on.
+// fetch — raced against a short timer so a wedged IndexedDB can never hold
+// the card hostage. And the un-linked state grew a LINK control, because a
+// hint about a URL hash is not something a man with paperwork in his hand can
+// act on. A link that cannot be reached shows the control again, pre-filled,
+// so a typo is fixed where it was made.
 let API = '';
+let bootLinkError = '';   // a #api= link the boot refused — shown, never swallowed
 const CFG_DB = 'bol-config', CFG_STORE = 'kv', CFG_KEY = 'api';
 function cfgDb() {
     return new Promise((res, rej) => {
         try {
             const r = indexedDB.open(CFG_DB, 1);
             r.onupgradeneeded = () => r.result.createObjectStore(CFG_STORE);
-            r.onsuccess = () => res(r.result);
+            r.onsuccess = () => { const db = r.result; db.onversionchange = () => db.close(); res(db); };
             r.onerror = () => rej(r.error);
+            r.onblocked = () => rej(new Error('bol-config open blocked'));
         } catch (e) { rej(e); }
     });
 }
 function cfgGet(key) {
     return cfgDb().then(db => new Promise((res, rej) => {
-        const t = db.transaction(CFG_STORE, 'readonly').objectStore(CFG_STORE).get(key);
+        const tx = db.transaction(CFG_STORE, 'readonly');
+        tx.oncomplete = tx.onabort = () => db.close();
+        const t = tx.objectStore(CFG_STORE).get(key);
         t.onsuccess = () => res(t.result == null ? null : t.result);
         t.onerror = () => rej(t.error);
-    })).catch(() => null);
+    })).catch(e => { console.warn('bol-config read failed', e); return null; });
 }
 function cfgPut(key, val) {
     return cfgDb().then(db => new Promise((res, rej) => {
-        const st = db.transaction(CFG_STORE, 'readwrite').objectStore(CFG_STORE);
+        const tx = db.transaction(CFG_STORE, 'readwrite');
+        tx.oncomplete = tx.onabort = () => db.close();
+        const st = tx.objectStore(CFG_STORE);
         const t = val == null ? st.delete(key) : st.put(val, key);
         t.onsuccess = () => res(true);
         t.onerror = () => rej(t.error);
-    })).catch(() => false);
+    })).catch(e => { console.warn('bol-config write failed', e); return false; });
 }
+// A pasted full URL reduces to its origin (https://host[:port]); query,
+// fragment and user-info are dropped; anything that is not http(s) is refused.
 function normalizeOrigin(v) {
-    v = String(v || '').trim().replace(/\/+$/, '');
-    return /^https?:\/\/[^\s/]+$/i.test(v) ? v : '';
+    let u;
+    try { u = new URL(String(v || '').trim()); } catch (_) { return ''; }
+    return /^https?:$/.test(u.protocol) ? u.origin : '';
 }
 function setApi(v) {
     const o = normalizeOrigin(v);
@@ -354,44 +367,51 @@ function setApi(v) {
 function clearApi() {
     API = '';
     try { localStorage.removeItem('bol_api'); } catch (_) {}
-    cfgPut(CFG_KEY, null);
+    return cfgPut(CFG_KEY, null);
 }
 // Boot: the hash wins, then localStorage, then the IDB survivor. CFG_READY
 // gates the first load-info fetch so a recovered link never flashes the
-// un-linked state first.
+// un-linked state first. An explicit #api=off is terminal — the survivor is
+// deleted and awaited, and recovery is skipped, so an unlink cannot undo
+// itself. The hash parse is its own try: a malformed hash must not cost a
+// linked device its link.
 const CFG_READY = (async () => {
-    try {
-        const m = location.hash.match(/^#api=(.+)$/);
-        if (m) {
-            const v = decodeURIComponent(m[1]);
-            if (v === 'off') clearApi(); else setApi(v);
-            history.replaceState(null, '', location.pathname + location.search);
-        }
-        if (!API) { try { API = localStorage.getItem('bol_api') || ''; } catch (_) {} }
-        if (!API) {
-            const saved = await cfgGet(CFG_KEY);
-            if (saved) { API = saved; try { localStorage.setItem('bol_api', saved); } catch (_) {} }
-        } else {
+    let m = null, v = '', unlinked = false;
+    try { m = location.hash.match(/^#api=(.+)$/); if (m) v = decodeURIComponent(m[1]); }
+    catch (_) { v = m ? m[1] : ''; }
+    if (m) {
+        if (v === 'off') { unlinked = true; await clearApi(); }
+        else if (!setApi(v)) bootLinkError = v;
+        try { history.replaceState(null, '', location.pathname + location.search); } catch (_) {}
+    }
+    if (!API && !unlinked) {
+        try { API = localStorage.getItem('bol_api') || ''; } catch (_) {}
+        if (API) {
             cfgPut(CFG_KEY, API);   // an old localStorage-only link gains its survivor copy
+        } else {
+            const saved = await Promise.race([
+                cfgGet(CFG_KEY), new Promise(r => setTimeout(() => r(null), 1500))]);
+            if (saved) { API = saved; try { localStorage.setItem('bol_api', saved); } catch (_) {} }
         }
-    } catch (e) { /* un-linked is a legal state; the LINK control handles it */ }
+    }
 })();
 // A hash-only navigation onto an already-open page never re-runs the config
 // block above — reload so the link works even when the app is already open.
 window.addEventListener('hashchange', () => {
     if (/^#api=/.test(location.hash)) location.reload();
 });
-// The LINK control (un-linked state): paste the origin, tap LINK.
+// The LINK control: paste the server address, tap LINK. fetchLoadInfo owns
+// the box's visibility — hidden on a good fetch, shown pre-filled on a miss.
 function linkBackend() {
     const inp = document.getElementById('linkInput');
     const statEl = document.getElementById('loadStatus');
     if (!setApi(inp.value)) {
         statEl.className = 'status warn';
-        statEl.textContent = 'That is not an origin — it looks like https://your-mac.tailxxxx.ts.net';
+        statEl.textContent = 'That does not look like a server address — it should start with https:// (like https://your-mac.tailxxxx.ts.net)';
         inp.focus();
         return;
     }
-    document.getElementById('linkBox').style.display = 'none';
+    bootLinkError = '';
     fetchLoadInfo();
 }
 document.addEventListener('DOMContentLoaded', () => {
@@ -412,16 +432,23 @@ async function fetchLoadInfo() {
     const rteEl = document.getElementById('loadRoute');
     const statEl = document.getElementById('loadStatus');
     const linkBox = document.getElementById('linkBox');
+    const linkInp = document.getElementById('linkInput');
+    const manual = document.querySelector('.load-manual');
     if (!API) {
         numEl.textContent = '---';
         brkEl.textContent = 'No backend linked';
         rteEl.textContent = '';
         statEl.className = 'status warn';
-        statEl.textContent = 'Paste your backend origin and tap LINK (or open with #api=<origin>)';
+        if (bootLinkError) {
+            statEl.textContent = 'The link you opened is not a valid server address — fix it and tap LINK';
+            if (linkInp && !linkInp.value) linkInp.value = bootLinkError;
+        } else {
+            statEl.textContent = 'Not linked to your scanner server. Paste the address you were given and tap LINK.';
+        }
         if (linkBox) linkBox.style.display = 'flex';
+        if (manual) manual.style.display = 'none';   // one input on the card, not two look-alikes
         return;
     }
-    if (linkBox) linkBox.style.display = 'none';
     statEl.className = 'status loading';
     statEl.textContent = 'Fetching load...';
     try {
@@ -429,6 +456,8 @@ async function fetchLoadInfo() {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         loadInfo = data;
+        if (linkBox) linkBox.style.display = 'none';    // a good link earns its silence
+        if (manual) manual.style.display = 'flex';
         numEl.textContent = 'Load #' + data.load_number;
         brkEl.textContent = data.broker_name;
         rteEl.textContent = data.pickup_city + ', ' + data.pickup_state + '  \u2192  ' + data.delivery_city + ', ' + data.delivery_state;
@@ -455,7 +484,10 @@ async function fetchLoadInfo() {
         brkEl.textContent = 'Could not connect';
         rteEl.textContent = '';
         statEl.className = 'status warn';
-        statEl.textContent = e.message || 'Connection failed';
+        statEl.textContent = 'Server not reachable — is the Mac awake? Tap \u21bb to retry. Wrong address? Fix it and tap LINK. (' + (e.message || 'connection failed') + ')';
+        // the address is right there to correct — a typo must never be a dead end
+        if (linkInp && !linkInp.value) linkInp.value = API;
+        if (linkBox) linkBox.style.display = 'flex';
     }
 }
 
@@ -1654,6 +1686,11 @@ function buildPdfBase64(srcPages) {
 
 async function saveBOL() {
     if (!pages.length) return;
+    if (!API) {   // card #176: un-linked is a designed state now — saving must say so, not 404 at github.io
+        showToast('Link your scanner server first — the LINK box at the top.', 'error');
+        const i = document.getElementById('linkInput'); if (i) i.focus();
+        return;
+    }
     if (!loadInfo || !loadInfo.load_number) { showToast('No load info. Refresh.', 'error'); return; }
     if (!loadInfo.folder_exists) { showToast('Load folder not found.', 'error'); return; }
 
