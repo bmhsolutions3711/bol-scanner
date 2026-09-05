@@ -80,6 +80,14 @@ body {
 .btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; border-radius: 10px; border: none; font-size: 16px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.4; pointer-events: none; }
+/* In flight is not off: the seconds counter has to read in dock sunlight. */
+.btn.sending:disabled { opacity: 0.85; }
+.pending-save { display: none; background: var(--surface); border: 1px solid var(--gold); border-radius: 10px; padding: 12px; margin-top: 10px; }
+.pending-save .pending-text { font-size: 13px; color: var(--text); line-height: 1.4; margin-bottom: 10px; }
+.pending-save .pending-actions { display: flex; gap: 8px; }
+.pending-save .pending-actions .btn { flex: 1; padding: 12px; font-size: 14px; }
+/* More than one save can be waiting — each one gets its own block, ruled off. */
+.pending-save .pending-sep { border-top: 1px solid var(--border); margin: 12px 0; }
 .btn-scan { background: var(--surface); border: 2px solid var(--gold); color: var(--gold); }
 .btn-save { background: var(--gold); color: #1a1a2e; }
 .btn-clear { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 14px; padding: 12px; }
@@ -228,6 +236,9 @@ body {
     <div id="pagesContainer">
         <div class="empty-state">No pages scanned yet.<br>Tap <strong>Scan Page</strong> or <strong>Camera Roll</strong> to start.</div>
     </div>
+    <!-- Card #161: a save the server never answered is offered back here after a
+         reload — same key, same bytes — instead of being re-scanned and doubled. -->
+    <div class="pending-save" id="pendingSave"></div>
 </div>
 
 <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
@@ -348,6 +359,17 @@ function cfgPut(key, val) {
         t.onerror = () => rej(t.error);
     })).catch(e => { console.warn('bol-config write failed', e); return false; });
 }
+// Every key in the store. The unsent saves each keep their OWN record, so the
+// boot has to ask what is in there rather than look under one known name.
+function cfgKeys() {
+    return cfgDb().then(db => new Promise((res, rej) => {
+        const tx = db.transaction(CFG_STORE, 'readonly');
+        tx.oncomplete = tx.onabort = () => db.close();
+        const t = tx.objectStore(CFG_STORE).getAllKeys();
+        t.onsuccess = () => res(t.result || []);
+        t.onerror = () => rej(t.error);
+    })).catch(e => { console.warn('bol-config key list failed', e); return []; });
+}
 // A pasted full URL reduces to its origin (https://host[:port]); query,
 // fragment and user-info are dropped; anything that is not http(s) is refused.
 function normalizeOrigin(v) {
@@ -423,6 +445,208 @@ let pages = [];
 let loadInfo = null;
 let loadList = [];
 let installPrompt = null;
+
+// ── Save identity (card #161) ───────────────────────────────────────────────
+// 31302, 08-27: the phone gave up on a slow save, he tapped again, and the
+// runner filed a second copy. Every send now carries an Idempotency-Key the
+// server dedups on — a key it has already filed answers with the ORIGINAL
+// entry. The key is minted when the first page lands and kept through a
+// failed send, so the retry IS the same save: same key, same bytes (the PDF is
+// not rebuilt on retry — jsPDF stamps a fresh timestamp into every build). It
+// is re-minted only when what would be sent changes after a send: different
+// pages, a different target, a different load = a different save.
+// `assembled` is the record last sent. It is mirrored to IndexedDB until the
+// server answers, so a tab Android killed mid-send can offer the SAME save
+// again on the next open instead of leaving him to re-scan and double it.
+// Each unsent save keeps its OWN record: a second scan must never evict the
+// first one's bytes (retention — never LOSE data).
+const SEND_TIMEOUT_MS = 120000;   // 30s called a slow cellular lane dead; the button shows the seconds now
+const PENDING_PREFIX = 'pending_save:';   // one IndexedDB record per unsent save, keyed by its save key
+const PENDING_MAX = 5;            // a dead lane can't fill the phone; the oldest is NAMED before it goes
+// The runner forgets a key after 7 days (script_runner.py BOL_KEYS_TTL_S). Past
+// that window a resend is NOT deduped, so the card has to stop promising it is.
+const KEY_TTL_MS = 7 * 86400 * 1000;
+let saveKey = '';
+let scanRev = 0;          // bumps on every page change, so a send can tell the pages moved under it
+let assembled = null;     // { key, rev, load_number, folder_path, doc_type, drop, pdf, pages, rung, ts }
+let pendingRecs = [];     // unsent saves, oldest first; memory mirror of the IndexedDB records
+let inFlight = false;
+
+function mintSaveKey() {
+    try { if (crypto.randomUUID) return crypto.randomUUID(); } catch (_) {}
+    // An old WebView without randomUUID: still unique enough to name one save on one phone.
+    return 'k-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+}
+// The folder is part of the target, not decoration. Two live loads can carry
+// the SAME number (Brustor 7 vs Distinctive 7, 08-20) and only the folder tells
+// them apart — and picking a load does not touch the pages, so nothing else
+// here would notice the change. Leave folder_path out and a re-pick after a
+// failed save resends the FIRST folder under the same key: filed into the wrong
+// customer, with the toast reporting success.
+function sameTarget(a, b) {
+    return a.load_number === b.load_number && a.doc_type === b.doc_type &&
+           (a.folder_path || '') === (b.folder_path || '') &&
+           (a.drop == null ? null : a.drop) === (b.drop == null ? null : b.drop);
+}
+function targetLabel(rec) {
+    const nice = rec.doc_type === 'FreightPhotos' ? 'Freight Photos' : (rec.doc_type || 'BOL');
+    return rec.drop ? nice + ' Drop ' + rec.drop : nice;
+}
+function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// One door for "not while a save is in the air". A page moving mid-send is what
+// used to switch the guard off: every page control re-renders, the revision
+// bumps, and the next tap mints a NEW key — a second entry with the button
+// still reporting the first send. The bytes are already built by then, so
+// refusing costs nothing but the wait.
+function busySending() {
+    if (!inFlight) return false;
+    showToast('A save is in flight — wait for the answer', 'error');
+    return true;
+}
+// The record goes to IndexedDB BEFORE the send, under its OWN key, raced
+// against a short timer — a wedged IndexedDB must never hold the save hostage.
+// A second unsent save no longer evicts the first: both stand as their own
+// card. Returns TRUE only if the write actually landed, because the Resend
+// card's promise is only as good as this write and a silent miss means he
+// closes the app believing the scan is safe.
+async function persistPending(rec) {
+    const i = pendingRecs.findIndex(r => r.key === rec.key);
+    if (i >= 0) pendingRecs[i] = rec; else pendingRecs.push(rec);
+    while (pendingRecs.length > PENDING_MAX) {
+        const old = pendingRecs.shift();
+        cfgPut(PENDING_PREFIX + old.key, null);
+        showToast('Dropped the oldest unsent save (load ' + old.load_number + ' · ' +
+                  targetLabel(old) + ') — ' + PENDING_MAX + ' unsent saves is the limit', 'error');
+    }
+    const ok = await Promise.race([cfgPut(PENDING_PREFIX + rec.key, rec),
+                                   new Promise(r => setTimeout(() => r(false), 1500))]);
+    renderPendingSave();
+    return ok === true;
+}
+// Clears ONE record by identity. A blind clear would let an answered send wipe
+// the record a different save had just written.
+function clearPending(key) {
+    if (!key) return Promise.resolve(false);
+    pendingRecs = pendingRecs.filter(r => r.key !== key);
+    return Promise.race([cfgPut(PENDING_PREFIX + key, null),
+                         new Promise(r => setTimeout(() => r(false), 1500))]);
+}
+// ONE send door for the Save button and the unsent-save Resend: the key rides
+// as a header, the control counts the seconds while the request is in flight,
+// and a timeout says the save is KEPT — the retry cannot double it.
+async function sendSave(rec, btn) {
+    const t0 = Date.now();
+    const secs = () => Math.round((Date.now() - t0) / 1000);
+    const show = () => { if (btn) btn.textContent = 'Sending… ' + secs() + 's'; };
+    if (btn) { btn.disabled = true; btn.classList.add('sending'); show(); }
+    const tick = setInterval(show, 1000);
+    inFlight = true;
+    try {
+        const res = await fetch(API + '/api/bol-upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Idempotency-Key': rec.key },
+            body: JSON.stringify({ pdf: rec.pdf, load_number: rec.load_number,
+                                   folder_path: rec.folder_path || '',
+                                   doc_type: rec.doc_type, drop: rec.drop }),
+            signal: AbortSignal.timeout(SEND_TIMEOUT_MS)
+        });
+        // A 413 is returned before the handler ever logs, so a silent failure here
+        // leaves NO server-side trace — say plainly what happened.
+        if (res.status === 413) {
+            throw new Error('Server rejected the upload as too large (413) — ' +
+                            'report this, the size ladder should have prevented it');
+        }
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        return data;
+    } catch (e) {
+        if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+            throw new Error('No answer after ' + secs() + 's — the save is kept; ' +
+                            'send it again and the server will not file it twice');
+        }
+        throw e;
+    } finally {
+        clearInterval(tick);
+        inFlight = false;
+        if (btn) btn.classList.remove('sending');
+    }
+}
+function savedToast(data, rung) {
+    // Never quietly ship a lower-resolution scan — say it landed reduced.
+    const shrunk = rung && rung.px ? ' (reduced to ' + rung.px + 'px to fit)' : '';
+    showToast(data.replayed
+        ? 'Already saved earlier as ' + data.filename + ' — no second copy made'
+        : (data.versioned ? 'Saved new version (kept the old): ' : 'Saved: ') + data.filename + shrunk,
+        'success');
+}
+// One card per unsent save. The card for the scan currently on the table is
+// hidden — there the Save button IS its retry — but every OTHER unsent save
+// stays offered, so picking up a new scan never buries an older one. Resend
+// needs no picker: each record carries its own load and target, so it works
+// even when the load list is empty at the dock.
+// The records are handed to the buttons by index (like the doc-target row)
+// rather than by pasting a key into an onclick — a record read back from
+// IndexedDB is data, and data never gets to write markup.
+function renderPendingSave() {
+    const el = document.getElementById('pendingSave');
+    if (!el) return;
+    const list = pendingRecs.filter(r => !(pages.length && r.key === saveKey));
+    el._list = list;
+    if (!list.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.innerHTML = list.map((rec, i) => {
+        const ts = rec.ts || Date.now();
+        const age = Date.now() - ts;
+        // A bare clock time let a week-old record read as tonight's. Anything
+        // older than half a day carries its date.
+        const when = new Date(ts).toLocaleString([], age > 43200000
+            ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+            : { hour: 'numeric', minute: '2-digit' });
+        // Past the runner's key window the dedup promise is simply not true any
+        // more — say the truth instead of repeating the promise.
+        const promise = age > KEY_TTL_MS
+            ? 'Older than 7 days — the server no longer remembers this save. Check the load folder first: a resend now CAN file a second copy.'
+            : 'The server may already have it — resending cannot file it twice.';
+        return '<div class="pending-text">Unsent save from ' + esc(when) + ' — load ' + esc(rec.load_number) +
+            ' · ' + esc(targetLabel(rec)) + ' · ' + esc(rec.pages) + ' page' +
+            (rec.pages === 1 ? '' : 's') + '. ' + esc(promise) + '</div>' +
+            '<div class="pending-actions">' +
+            '<button type="button" class="btn btn-save" id="resendBtn' + i +
+            '" onclick="resendPending(' + i + ')">&#128190; Resend</button>' +
+            '<button type="button" class="btn btn-clear" onclick="discardPending(' + i + ')">Discard</button></div>';
+    }).join('<div class="pending-sep"></div>');
+    el.style.display = 'block';
+}
+function pendingAt(i) {
+    const el = document.getElementById('pendingSave');
+    return (el && el._list && el._list[i]) || null;
+}
+async function resendPending(i) {
+    const rec = pendingAt(i);
+    if (!rec || inFlight) return;
+    if (!API) { showToast('Link your scanner server first — the LINK box at the top.', 'error'); return; }
+    const btn = document.getElementById('resendBtn' + i);
+    try {
+        const data = await sendSave(rec, btn);
+        await clearPending(rec.key);
+        if (assembled && assembled.key === rec.key) assembled = null;
+        savedToast(data, rec.rung);
+    } catch (e) {
+        showToast('Resend failed: ' + (e.message || 'Unknown'), 'error');
+    } finally {
+        renderPendingSave();
+    }
+}
+function discardPending(i) {
+    const rec = pendingAt(i);
+    if (!rec || inFlight) return;
+    if (!confirm('Discard the unsent save for load ' + rec.load_number + ' (' + targetLabel(rec) +
+                 ')? If it never reached the server, that scan is gone.')) return;
+    clearPending(rec.key);
+    renderPendingSave();
+}
 
 // ── Load Info ───────────────────────────────────────────────────────────────
 async function fetchLoadInfo() {
@@ -587,6 +811,7 @@ function useManualLoad() {
 
 // ── Camera ──────────────────────────────────────────────────────────────────
 function openCamera() {
+    if (busySending()) return;
     document.getElementById('cameraInput').click();
 }
 
@@ -610,6 +835,7 @@ let importTotal = 0;    // 0 = not in batch mode
 let importDone  = 0;    // pages actually added this batch
 
 function openRoll() {
+    if (busySending()) return;
     document.getElementById('rollInput').click();
 }
 
@@ -788,6 +1014,13 @@ function finishPage(canvas) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(enhanced, 0, 0, w, h);
     pages.push({ dataUrl: c.toDataURL('image/jpeg', OUT_QUALITY), width: w, height: h });
+    // The scan doors (Scan Page / Camera Roll) refuse while a save is in the
+    // air, but a camera-roll BATCH already running can land a page here mid-send.
+    // Refusing would throw away a page he just cropped, so the page is kept —
+    // what must not happen is it changing the send silently. It goes in the NEXT
+    // save under a NEW key; the send in flight keeps its own key and its own
+    // unsent-save card, so neither one is lost.
+    if (inFlight) showToast('Page added — it goes in the NEXT save; the send in flight is unchanged', 'error');
     renderPages();
 }
 
@@ -1449,6 +1682,10 @@ let stampState = {
 };
 
 function openStampEditor(idx) {
+    // Refused at the door, not at Accept: turning away a signature he already
+    // placed would throw his work away, and both editors cover the Save button
+    // anyway — a send cannot start once one is open.
+    if (busySending()) return;
     const sig = localStorage.getItem('bol_signature');
     if (!sig) {
         showToast('Tap ✍ Sig to set up your signature first', 'error');
@@ -1627,10 +1864,18 @@ function acceptStamp() {
 
 // ── Pages Rendering ─────────────────────────────────────────────────────────
 function renderPages() {
+    // Card #161: every page change lands here — bump the revision so a send
+    // knows, mint the key with the first page, drop it with the last.
+    scanRev++;
+    if (!pages.length) saveKey = '';
+    else if (!saveKey) saveKey = mintSaveKey();
+    renderPendingSave();
     const container = document.getElementById('pagesContainer');
     document.getElementById('pagesHeader').textContent = 'Scanned Pages: ' + pages.length;
-    document.getElementById('saveBtn').disabled = pages.length === 0;
-    document.getElementById('clearBtn').disabled = pages.length === 0;
+    // A send in flight owns these two. Without that the re-render behind any
+    // page edit hands the Save button straight back mid-send.
+    document.getElementById('saveBtn').disabled = inFlight || pages.length === 0;
+    document.getElementById('clearBtn').disabled = inFlight || pages.length === 0;
 
     if (pages.length === 0) {
         container.innerHTML = '<div class="empty-state">No pages scanned yet.<br>Tap <strong>Scan Page</strong> to start.</div>';
@@ -1653,18 +1898,19 @@ function renderPages() {
     container.innerHTML = html + '</div>';
 }
 
-function removePage(i) { pages.splice(i, 1); renderPages(); }
+function removePage(i) { if (busySending()) return; pages.splice(i, 1); renderPages(); }
 
 // Reorder pages. A multi-page BOL must go back to the broker in its printed
 // sequence — C Cross rejects BOLs with missing or altered page numbers — and a
 // camera-roll batch arrives in whatever order the picker hands over.
 function movePage(i, delta) {
+    if (busySending()) return;
     const j = i + delta;
     if (j < 0 || j >= pages.length) return;
     [pages[i], pages[j]] = [pages[j], pages[i]];
     renderPages();
 }
-function clearPages() { if (pages.length && confirm('Clear all?')) { pages = []; renderPages(); } }
+function clearPages() { if (busySending()) return; if (pages.length && confirm('Clear all?')) { pages = []; renderPages(); } }
 function previewPage(i) {
     const o = document.createElement('div');
     o.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.95);z-index:150;display:flex;align-items:center;justify-content:center;padding:16px;';
@@ -1692,6 +1938,11 @@ function buildPdfBase64(srcPages) {
 }
 
 async function saveBOL() {
+    // One save in the air at a time — the same door resendPending stands behind.
+    // Without it a page edit that re-enables the button (or a Resend already
+    // running) lets a SECOND send start under a freshly minted key: the exact
+    // double this card exists to prevent, with the button reporting the first.
+    if (inFlight) { showToast('A save is in flight — wait for the answer', 'error'); return; }
     if (!pages.length) return;
     if (!API) {   // card #176: un-linked is a designed state now — saving must say so, not 404 at github.io
         showToast('Link your scanner server first — the LINK box at the top.', 'error');
@@ -1710,8 +1961,17 @@ async function saveBOL() {
     fill.style.width = '10%';
 
     try {
+        // Card #161: a retry of a send that got no answer goes out as the SAME
+        // save — same key, same bytes. Anything changed since = a new save.
+        const target = { load_number: loadInfo.load_number, folder_path: loadInfo.folder_path || '',
+                         doc_type: docTarget.doc_type, drop: docTarget.drop };
+        const reuse = !!(assembled && assembled.rev === scanRev && sameTarget(assembled, target));
+        if (assembled && !reuse) {
+            if (assembled.key === saveKey) saveKey = mintSaveKey();
+            assembled = null;
+        }
         fill.style.width = '20%';
-        let pdfBase64 = buildPdfBase64(pages);
+        let pdfBase64 = reuse ? assembled.pdf : buildPdfBase64(pages);
         fill.style.width = '60%';
 
         // The backend caps the upload body at 10MB, and pages are stored at ~300 DPI
@@ -1747,7 +2007,7 @@ async function saveBOL() {
         const firstPxRung = ladder.findIndex(r => r.px);
         const startAt = (pdfBase64.length > LIMIT * 2 && firstPxRung > 0) ? firstPxRung : 0;
 
-        let usedRung = null;
+        let usedRung = reuse ? assembled.rung : null;   // a reused PDF is already under the cap
         for (let i = startAt; i < ladder.length && pdfBase64.length > LIMIT; i++) {
             const rung = ladder[i];
             console.warn('upload ' + (pdfBase64.length / 1048576).toFixed(1) +
@@ -1772,31 +2032,27 @@ async function saveBOL() {
         }
 
         fill.style.width = '75%';
-        const res = await fetch(API + '/api/bol-upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pdf: pdfBase64, load_number: loadInfo.load_number,
-                                   folder_path: loadInfo.folder_path || '',
-                                   doc_type: docTarget.doc_type,
-                                   drop: docTarget.drop }),
-            signal: AbortSignal.timeout(30000)
-        });
+        if (!reuse) {
+            assembled = Object.assign({ key: saveKey, rev: scanRev, pdf: pdfBase64, pages: pages.length,
+                                        rung: usedRung, ts: Date.now() }, target);
+        }
+        // The Resend card is only as good as this write. A wedged or full
+        // IndexedDB fails it quietly, and the in-flight state looks completely
+        // normal — so say it BEFORE the wait, while he can still choose to hold
+        // the app open instead of closing it on a save that would not come back.
+        const kept = await persistPending(assembled);
+        if (!kept) {
+            showToast('No local copy of this save — do NOT close the app until it answers', 'error');
+        }
+        const data = await sendSave(assembled, saveBtn);
 
         fill.style.width = '95%';
-        // A 413 is returned before the handler ever logs, so a silent failure here
-        // leaves NO server-side trace — say plainly what happened.
-        if (res.status === 413) {
-            throw new Error('Server rejected the upload as too large (413) — ' +
-                            'report this, the size ladder should have prevented it');
-        }
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-
+        // Clear THIS save's record by name. A blind clear would wipe whatever
+        // record happened to be current — including one another save just wrote.
+        await clearPending(assembled.key);
         fill.style.width = '100%';
-        // Never quietly ship a lower-resolution scan — say it landed reduced.
-        const shrunk = usedRung && usedRung.px ? ' (reduced to ' + usedRung.px + 'px to fit)' : '';
-        showToast((data.versioned ? 'Saved new version (kept the old): ' : 'Saved: ') +
-                  data.filename + shrunk, 'success');
+        savedToast(data, usedRung);
+        assembled = null;
         pages = [];
         renderPages();
     } catch (e) {
@@ -1832,6 +2088,22 @@ function installApp() {
 // SW registration handled by the BIK PWA standard block in <head> (auto-update + #reset).
 
 fetchLoadInfo();
+// Card #161: every save the server never answered is offered back after a
+// reload, same key and bytes. Each one is its own record, so the boot asks the
+// store what is in there rather than looking under one known name. Raced like
+// the config read — a wedged IndexedDB never holds the boot.
+CFG_READY.then(() => Promise.race([cfgKeys(), new Promise(r => setTimeout(() => r([]), 1500))]))
+    .then(keys => Promise.all((keys || [])
+        .filter(k => typeof k === 'string' && k.startsWith(PENDING_PREFIX))
+        .map(k => cfgGet(k))))
+    .then(recs => {
+        // Oldest first, so the eviction cap drops the oldest and the cards read
+        // in the order they were scanned.
+        pendingRecs = (recs || []).filter(r => r && r.key && r.pdf)
+                                  .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+        renderPendingSave();
+    })
+    .catch(e => console.warn('pending save read failed', e));
 </script>
 </body>
 </html>
