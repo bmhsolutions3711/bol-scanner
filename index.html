@@ -846,11 +846,14 @@ function loadOpenCV() {
 
         const script = document.createElement('script');
         script.setAttribute('async', '');
-        // No integrity= pin here ON PURPOSE: docs.opencv.org sends no CORS header and a
-        // browser only hash-checks a CORS load, so pinning makes the engine refuse to load
-        // at all (proven in the browser, card #187). jsPDF above IS pinned; OpenCV waits on
-        // Bryan's ruling (CORS host or vendor) — see products/scanner-public/README.md.
-        script.src = 'https://docs.opencv.org/4.9.0/opencv.js';
+        // Pinned from a CORS host (his ruling, card #187): docs.opencv.org sends no CORS
+        // header and a browser only hash-checks a CORS load, so the engine rides jsDelivr's
+        // immutable @techstark/opencv-js 4.9.0 build. A tampered copy fails the hash and
+        // never runs. integrity + crossOrigin must be set BEFORE src. This file's sw.js is
+        // untouched on purpose (a bump wipes the cached engine at the dock).
+        script.integrity = 'sha384-i0aokRC/FHyybXeYNiEdEj+j/sZBWuQjZLgZSjydZL+Wq7uQeNsmJ2Jv5XOjshzx';
+        script.crossOrigin = 'anonymous';
+        script.src = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.1/dist/opencv.js';
         script.addEventListener('load', () => {
             // OpenCV.js may need WASM init
             if (typeof cv !== 'undefined' && typeof cv.Mat !== 'undefined') {
