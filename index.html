@@ -748,10 +748,15 @@ function renderDocTargets() {
         box.innerHTML = '';
         return;
     }
-    // The BOL stays ONE combined document (all sequentially numbered pages);
-    // only the PODs split by drop.
+    // A multi-drop BOL is EITHER one combined document (all sequentially
+    // numbered pages) OR one per stop when each order ships on its own BOL
+    // (7537-SS, 10/01) — offer both; the packet gate requires every drop's BOL
+    // once any per-drop BOL is filed. PODs always split by drop.
     const multi = (loadInfo.drop_count || 1) >= 2 && drops.length;
     const targets = [{ doc_type: 'BOL', drop: null, label: 'BOL (all pages)' }]
+        .concat(multi
+            ? drops.map(d => ({ doc_type: 'BOL', drop: d.seq, label: 'BOL Drop ' + d.seq + ' · ' + d.label }))
+            : [])
         .concat(multi
             ? drops.map(d => ({ doc_type: 'POD', drop: d.seq, label: 'POD Drop ' + d.seq + ' · ' + d.label }))
             : [{ doc_type: 'POD', drop: null, label: 'POD' }])
