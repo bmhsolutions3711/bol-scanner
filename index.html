@@ -178,6 +178,9 @@ body {
 .stamp-chip { flex: 0 0 auto; padding: 10px 14px; border-radius: 18px; border: 1px solid var(--border); background: transparent; color: var(--text); font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .stamp-chip.armed { background: var(--gold); border-color: var(--gold); color: #1a1a2e; }
 .stamp-chip.unset { color: var(--text-dim); border-style: dashed; }
+.zoom-bar { position: absolute; top: 8px; right: 8px; z-index: 2; display: flex; gap: 6px; }
+.zoom-bar button { min-width: 44px; height: 44px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--gold); background: rgba(26,26,46,0.88); color: var(--gold); font-size: 18px; font-weight: 700; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.zoom-bar button.zfit { font-size: 13px; }
 .stamps-modal { display: none; position: fixed; inset: 0; z-index: 140; background: var(--bg); flex-direction: column; padding: 16px; }
 .stamps-modal.active { display: flex; }
 .stamps-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
@@ -325,6 +328,13 @@ body {
     </div>
     <div class="stamp-viewport" id="stampViewport">
         <canvas id="stampCanvas"></canvas>
+        <!-- Zoom (his ask 10-02: "zoom in and out of the docs to find and
+             identify where to sign"). Pinch works too, on the page. -->
+        <div class="zoom-bar" role="group" aria-label="Zoom">
+            <button type="button" onclick="stampZoomStep(1 / 1.5)" aria-label="Zoom out">&minus;</button>
+            <button type="button" class="zfit" onclick="stampZoomFit()" aria-label="Fit the page">Fit</button>
+            <button type="button" onclick="stampZoomStep(1.5)" aria-label="Zoom in">+</button>
+        </div>
     </div>
     <div class="stamp-palette" id="stampPalette" role="group" aria-label="Stamps"></div>
     <div class="crop-actions">
@@ -2083,8 +2093,14 @@ let stampState = {
     activePointers: {},
     pinchStart: null,
     drag: null,            // pointer offset from the selected stamp's top-left (image coords)
+    zoom: 1,               // 1 = the whole page fits; up to STAMP_ZOOM_MAX
+    panX: 0, panY: 0,      // screen-px shift from centred, clamped so the page covers the view
+    pageZoom: null,        // a two-finger zoom of the PAGE in progress
+    panDrag: null,         // a one-finger pan of the page in progress
+    tapPlace: null,        // an armed stamp waits for the finger to LIFT — a pinch or a pan is not a placement
     scale: 1, offsetX: 0, offsetY: 0
 };
+const STAMP_ZOOM_MAX = 6;
 
 function openStampEditor(idx) {
     // Refused at the door, not at Apply: turning away stamps he already
@@ -2094,7 +2110,8 @@ function openStampEditor(idx) {
 
     Object.assign(stampState, {
         pageIdx: idx, pageImg: null, placed: [], selected: -1, prevSel: -1, armed: null,
-        activePointers: {}, pinchStart: null, drag: null
+        activePointers: {}, pinchStart: null, drag: null,
+        zoom: 1, panX: 0, panY: 0, pageZoom: null, panDrag: null, tapPlace: null
     });
     document.getElementById('stampEditor').classList.add('active');
     renderPalette();
@@ -2127,7 +2144,7 @@ function setStampStatus() {
     const armed = PALETTE.find(p => p.kind === stampState.armed);
     el.textContent = armed ? 'Tap where the ' + armed.label.replace(/^\S+\s/, '') + ' goes'
         : stampState.selected >= 0 ? 'Drag to move · pinch to size · ✕ removes'
-        : 'Pick a stamp, then tap where it goes';
+        : 'Pick a stamp, then tap where it goes · pinch or + to zoom';
 }
 
 function renderPalette() {
@@ -2232,12 +2249,18 @@ function renderStampCanvas() {
     const dpr = window.devicePixelRatio || 1;
 
     const fit = Math.min(vpW / pageImg.width, vpH / pageImg.height);
-    const drawW = pageImg.width * fit;
-    const drawH = pageImg.height * fit;
-    const offX = (vpW - drawW) / 2;
-    const offY = (vpH - drawH) / 2;
+    const scale = fit * stampState.zoom;
+    const drawW = pageImg.width * scale;
+    const drawH = pageImg.height * scale;
+    // Zoomed past the view, the page always covers it (no panning into the
+    // black); smaller than the view, it sits centred.
+    const cx = (vpW - drawW) / 2, cy = (vpH - drawH) / 2;
+    const offX = drawW > vpW ? Math.min(0, Math.max(vpW - drawW, cx + stampState.panX)) : cx;
+    const offY = drawH > vpH ? Math.min(0, Math.max(vpH - drawH, cy + stampState.panY)) : cy;
+    stampState.panX = offX - cx;
+    stampState.panY = offY - cy;
 
-    stampState.scale = fit;
+    stampState.scale = scale;
     stampState.offsetX = offX;
     stampState.offsetY = offY;
 
@@ -2252,11 +2275,11 @@ function renderStampCanvas() {
     ctx.fillRect(0, 0, vpW, vpH);
     ctx.drawImage(pageImg, offX, offY, drawW, drawH);
 
-    placed.forEach(s => ctx.drawImage(s.src, offX + s.x * fit, offY + s.y * fit, s.w * fit, s.w * s.aspect * fit));
+    placed.forEach(s => ctx.drawImage(s.src, offX + s.x * scale, offY + s.y * scale, s.w * scale, s.w * s.aspect * scale));
 
     const s = placed[selected];
     if (s) {
-        const sx = offX + s.x * fit, sy = offY + s.y * fit, sw = s.w * fit, sh = s.w * s.aspect * fit;
+        const sx = offX + s.x * scale, sy = offY + s.y * scale, sw = s.w * scale, sh = s.w * s.aspect * scale;
         ctx.strokeStyle = 'rgba(229,181,36,0.9)';
         ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]);
@@ -2272,6 +2295,28 @@ function renderStampCanvas() {
         ctx.moveTo(hx + 5, hy - 5); ctx.lineTo(hx - 5, hy + 5);
         ctx.stroke();
     }
+}
+
+// Zoom to `z`, holding the page point under screen point (sx, sy) where it is.
+function stampZoomTo(z, sx, sy, ix, iy) {
+    const { pageImg } = stampState;
+    if (!pageImg) return;
+    const vp = document.getElementById('stampViewport');
+    const vpW = vp.clientWidth, vpH = vp.clientHeight;
+    if (ix == null) { ix = (sx - stampState.offsetX) / stampState.scale; iy = (sy - stampState.offsetY) / stampState.scale; }
+    stampState.zoom = Math.max(1, Math.min(STAMP_ZOOM_MAX, z));
+    const ns = Math.min(vpW / pageImg.width, vpH / pageImg.height) * stampState.zoom;
+    stampState.panX = (sx - ix * ns) - (vpW - pageImg.width * ns) / 2;
+    stampState.panY = (sy - iy * ns) - (vpH - pageImg.height * ns) / 2;
+    renderStampCanvas();
+}
+function stampZoomStep(f) {
+    const vp = document.getElementById('stampViewport');
+    stampZoomTo(stampState.zoom * f, vp.clientWidth / 2, vp.clientHeight / 2);
+}
+function stampZoomFit() {
+    stampState.zoom = 1; stampState.panX = stampState.panY = 0;
+    renderStampCanvas();
 }
 
 // An 11pt text stamp is 6-10 screen px tall — too thin to land a finger on.
@@ -2298,6 +2343,29 @@ function stampDown(e) {
 
     const ptrs = Object.values(stampState.activePointers);
     if (ptrs.length === 2) {
+        // Two fingers are never a placement and never a one-finger pan.
+        stampState.tapPlace = null;
+        stampState.panDrag = null;
+        const rect2 = e.target.getBoundingClientRect();
+        const mx = (ptrs[0].x + ptrs[1].x) / 2 - rect2.left, my = (ptrs[0].y + ptrs[1].y) / 2 - rect2.top;
+        const dist0 = Math.hypot(ptrs[1].x - ptrs[0].x, ptrs[1].y - ptrs[0].y);
+        // A pinch ON the held stamp (a finger or the midpoint over it — a
+        // finger either side of it counts) sizes the stamp; anywhere else, or
+        // with a stamp armed, it zooms the PAGE about the fingers. Right after
+        // placing a stamp is exactly when he pinches to check it (review,
+        // card #387).
+        const heldIdx = placed[stampState.selected] ? stampState.selected
+                      : placed[stampState.prevSel] ? stampState.prevSel : -1;
+        const toImg = (cx, cy) => [(cx - rect2.left - offsetX) / scale, (cy - rect2.top - offsetY) / scale];
+        const onHeld = heldIdx >= 0 && [toImg(ptrs[0].x, ptrs[0].y), toImg(ptrs[1].x, ptrs[1].y),
+                                        [(mx - offsetX) / scale, (my - offsetY) / scale]]
+            .some(([ix2, iy2]) => stampHit(ix2, iy2) === heldIdx);
+        if (stampState.armed || !onHeld) {
+            stampState.drag = null;
+            stampState.pageZoom = { dist: dist0, zoom: stampState.zoom,
+                                    ix: (mx - offsetX) / scale, iy: (my - offsetY) / scale };
+            return;
+        }
         // A pinch puts a finger either side of the stamp, so the first finger
         // usually misses it and deselects — the second restores what it held.
         if (stampState.selected < 0 && placed[stampState.prevSel]) {
@@ -2335,13 +2403,17 @@ function stampDown(e) {
         }
     }
     const onPage = ix >= 0 && ix <= pageImg.width && iy >= 0 && iy <= pageImg.height;
+    // A finger on empty page may become a pan; an armed stamp lands only when
+    // that finger lifts without travelling.
+    stampState.panDrag = { x: e.clientX, y: e.clientY, panX: stampState.panX, panY: stampState.panY };
     if (stampState.armed) {
-        if (onPage) placeStamp(stampState.armed, ix, iy);
+        stampState.tapPlace = onPage ? { id: e.pointerId, x: e.clientX, y: e.clientY, ix, iy } : null;
         return;
     }
     const hit = stampHit(ix, iy);
     stampState.selected = hit;
     stampState.drag = hit >= 0 ? { dx: ix - placed[hit].x, dy: iy - placed[hit].y } : null;
+    if (hit >= 0) stampState.panDrag = null;
     renderStampCanvas();
     setStampStatus();
 }
@@ -2351,10 +2423,31 @@ function stampMove(e) {
     e.preventDefault();
     stampState.activePointers[e.pointerId] = { x: e.clientX, y: e.clientY };
     const { placed, selected, pageImg } = stampState;
-    const s = placed[selected];
-    if (!s || !pageImg) return;
-
+    if (!pageImg) return;
     const ptrs = Object.values(stampState.activePointers);
+    if (ptrs.length === 2 && stampState.pageZoom) {
+        const pz = stampState.pageZoom, rect = e.target.getBoundingClientRect();
+        const dist = Math.hypot(ptrs[1].x - ptrs[0].x, ptrs[1].y - ptrs[0].y);
+        // The page point first under the fingers stays under them: zoom and a
+        // two-finger pan in one gesture.
+        stampZoomTo(pz.zoom * (dist / pz.dist),
+                    (ptrs[0].x + ptrs[1].x) / 2 - rect.left, (ptrs[0].y + ptrs[1].y) / 2 - rect.top, pz.ix, pz.iy);
+        return;
+    }
+    if (ptrs.length === 1) {
+        const tp = stampState.tapPlace;
+        if (tp && Math.hypot(e.clientX - tp.x, e.clientY - tp.y) > 10) stampState.tapPlace = null;   // travelled: a pan, not a placement
+        const pd = stampState.panDrag;
+        if (pd && !stampState.drag && stampState.zoom > 1 && Math.hypot(e.clientX - pd.x, e.clientY - pd.y) > 6) {
+            stampState.tapPlace = null;   // the page moved under the finger — lifting is not a placement
+            stampState.panX = pd.panX + (e.clientX - pd.x);
+            stampState.panY = pd.panY + (e.clientY - pd.y);
+            renderStampCanvas();
+            return;
+        }
+    }
+    const s = placed[selected];
+    if (!s) return;
     if (ptrs.length === 2 && stampState.pinchStart) {
         const ps = stampState.pinchStart;
         const dist = Math.hypot(ptrs[1].x - ptrs[0].x, ptrs[1].y - ptrs[0].y);
@@ -2376,9 +2469,14 @@ function stampMove(e) {
 }
 
 function stampUp(e) {
+    const tp = stampState.tapPlace;
     delete stampState.activePointers[e.pointerId];
-    if (Object.keys(stampState.activePointers).length < 2) stampState.pinchStart = null;
-    if (Object.keys(stampState.activePointers).length === 0) stampState.drag = null;
+    if (tp && tp.id === e.pointerId && e.type === 'pointerup' && stampState.armed) {
+        stampState.tapPlace = null;
+        placeStamp(stampState.armed, tp.ix, tp.iy);
+    }
+    if (Object.keys(stampState.activePointers).length < 2) { stampState.pinchStart = null; stampState.pageZoom = null; }
+    if (Object.keys(stampState.activePointers).length === 0) { stampState.drag = null; stampState.panDrag = null; stampState.tapPlace = null; }
 }
 
 function acceptStamp() {
