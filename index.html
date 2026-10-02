@@ -98,7 +98,10 @@ body {
 .progress-bar .fill { height: 100%; background: var(--gold); transition: width 0.3s; }
 
 /* ── Toast ───────────────────────────────────────────── */
-.toast { position: fixed; bottom: 24px; left: 16px; right: 16px; padding: 14px 16px; border-radius: 10px; font-size: 14px; font-weight: 600; text-align: center; transform: translateY(120%); transition: transform 0.3s; z-index: 200; }
+.toast { position: fixed; bottom: 24px; left: 16px; right: 16px; padding: 14px 16px; border-radius: 10px; font-size: 14px; font-weight: 600; text-align: center; transform: translateY(calc(100% + 32px)); transition: transform 0.3s; z-index: 200; pointer-events: none; }
+/* A toast only speaks. It sat over the drawing pad's Save for 3.5s and ate the
+   tap that saves his initials right after his signature (card #381). Hidden, it
+   clears its own 24px lift — 120% left a coloured sliver on the bottom edge. */
 .toast.show { transform: translateY(0); }
 .toast.success { background: var(--green); color: #fff; }
 .toast.error { background: var(--red); color: #fff; }
@@ -169,6 +172,24 @@ body {
 .stamp-editor.active { display: flex; }
 .stamp-viewport { flex: 1; position: relative; overflow: hidden; touch-action: none; }
 .stamp-viewport canvas { position: absolute; top: 0; left: 0; }
+/* ── Stamps (card #381) ──────────────────────────────── */
+.stamp-palette { display: flex; gap: 8px; padding: 12px 16px 0; overflow-x: auto; scrollbar-width: none; }
+.stamp-palette::-webkit-scrollbar { display: none; }
+.stamp-chip { flex: 0 0 auto; padding: 10px 14px; border-radius: 18px; border: 1px solid var(--border); background: transparent; color: var(--text); font-size: 13px; font-weight: 700; white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.stamp-chip.armed { background: var(--gold); border-color: var(--gold); color: #1a1a2e; }
+.stamp-chip.unset { color: var(--text-dim); border-style: dashed; }
+.stamps-modal { display: none; position: fixed; inset: 0; z-index: 140; background: var(--bg); flex-direction: column; padding: 16px; }
+.stamps-modal.active { display: flex; }
+.stamps-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
+.stamps-row { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.stamps-label, .stamps-field span { font-size: 12px; font-weight: 700; color: var(--gold); letter-spacing: 0.5px; text-transform: uppercase; }
+.stamps-label { flex: 0 0 72px; }
+.stamps-prev { flex: 1; min-width: 0; height: 44px; display: flex; align-items: center; justify-content: flex-start; padding: 0 8px; border-radius: 6px; background: #fff; overflow: hidden; }
+.stamps-prev img { max-height: 40px; max-width: 100%; }
+.stamps-prev.empty { background: transparent; border: 1px dashed var(--border); color: var(--text-dim); font-size: 12px; }
+.stamps-row .btn { flex: 0 0 auto; padding: 10px 16px; font-size: 14px; }
+.stamps-field { display: flex; flex-direction: column; gap: 6px; }
+.stamps-field input, .stamps-field textarea { width: 100%; font-family: inherit; font-size: 16px; padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); resize: none; }
 </style>
 <script>
 /* BIK PWA standard (static — auto-update + #reset). Source: bik/pwa-standard/bik-pwa.js */
@@ -197,7 +218,7 @@ body {
 <body>
 
 <div class="header">
-    <button class="header-btn" onclick="openSigModal()" title="Setup signature">&#9997; Sig</button>
+    <button class="header-btn" onclick="openStampsSetup()" title="Set up your stamps">&#9997; Stamps</button>
     <h1>BOL Scanner</h1>
     <div class="sub">BMH Solutions</div>
 </div>
@@ -283,7 +304,7 @@ body {
 
 <!-- ── Signature Setup Modal ──────────────────────────── -->
 <div class="sig-modal" id="sigModal">
-    <div class="sig-title">Draw Your Signature</div>
+    <div class="sig-title" id="sigTitle">Draw Your Signature</div>
     <div class="sig-sub">Sign with your finger. Saved locally on this device.</div>
     <canvas class="sig-pad" id="sigPad"></canvas>
     <div class="sig-actions">
@@ -296,15 +317,51 @@ body {
 <!-- ── Stamp Editor Overlay ──────────────────────────── -->
 <div class="stamp-editor" id="stampEditor">
     <div class="crop-header">
-        <span class="crop-title">Place Signature</span>
-        <span class="crop-status">Tap to place, drag to move, pinch to resize</span>
+        <span class="crop-title">Stamp This Page</span>
+        <span class="crop-status" id="stampStatus">Pick a stamp, then tap where it goes</span>
     </div>
     <div class="stamp-viewport" id="stampViewport">
         <canvas id="stampCanvas"></canvas>
     </div>
+    <div class="stamp-palette" id="stampPalette" role="group" aria-label="Stamps"></div>
     <div class="crop-actions">
-        <button class="btn btn-clear" onclick="closeStampEditor()">Cancel</button>
+        <button class="btn btn-clear" onclick="cancelStampEditor()">Cancel</button>
+        <button class="btn btn-clear crop-rotate" onclick="undoStamp()" title="Undo the last stamp" aria-label="Undo the last stamp">&#8617;</button>
         <button class="btn btn-save" onclick="acceptStamp()">Apply</button>
+    </div>
+</div>
+
+<!-- ── My Stamps (card #381) ─────────────────────────── -->
+<!-- His values live on the phone (localStorage + the bol-config IndexedDB
+     survivor), never in this file: the page is public (a7f7787). -->
+<div class="stamps-modal" id="stampsModal">
+    <div class="sig-title">My Stamps</div>
+    <div class="sig-sub">Set them once. They stay on this phone.</div>
+    <div class="stamps-body">
+        <div class="stamps-row">
+            <span class="stamps-label">Signature</span>
+            <div class="stamps-prev" id="stampsPrev_signature"></div>
+            <button class="btn btn-scan" onclick="openSigModal('signature')">Draw</button>
+        </div>
+        <div class="stamps-row">
+            <span class="stamps-label">Initials</span>
+            <div class="stamps-prev" id="stampsPrev_initials"></div>
+            <button class="btn btn-scan" onclick="openSigModal('initials')">Draw</button>
+        </div>
+        <label class="stamps-field"><span>Address</span>
+            <textarea id="stamp_address" rows="2" autocomplete="off" placeholder="Street, City, ST ZIP"></textarea></label>
+        <label class="stamps-field"><span>MC</span>
+            <input id="stamp_mc" type="text" autocomplete="off" placeholder="e.g. MC 1234567"></label>
+        <label class="stamps-field"><span>DOT</span>
+            <input id="stamp_dot" type="text" autocomplete="off" placeholder="e.g. DOT 1234567"></label>
+        <label class="stamps-field"><span>Phone</span>
+            <input id="stamp_phone" type="tel" autocomplete="off" placeholder="(555) 555-5555"></label>
+        <label class="stamps-field"><span>Email</span>
+            <input id="stamp_email" type="email" autocapitalize="none" autocomplete="off" spellcheck="false" placeholder="you@business.com"></label>
+    </div>
+    <div class="sig-actions">
+        <button class="btn btn-clear" onclick="closeStampsSetup()">Cancel</button>
+        <button class="btn btn-save" onclick="saveStampsSetup()">Save</button>
     </div>
 </div>
 
@@ -1525,14 +1582,133 @@ function pageResolved(added) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ── Signature Drawer (setup / storage) ──────────────────────────────────
+// ── Stamps: the store (card #381) ───────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// His words, 2026-10-02: "the ability to stamp things that i do all the time.
+// Full signature, Initials, Address, MC, DOT, Phone number, business email."
+// The values are HIS and this page is public (a7f7787), so nothing of his is
+// ever written into this file. Like the backend link (card #176) each stamp
+// lives in TWO places: localStorage for the synchronous read, and the
+// bol-config IndexedDB store as the survivor an eviction cannot take.
+const IMG_STAMPS = {
+    signature: { ls: 'bol_signature', idb: 'stamp:signature', label: 'Signature', title: 'Draw Your Signature', widthFrac: 0.25 },
+    initials:  { ls: 'bol_initials',  idb: 'stamp:initials',  label: 'Initials',  title: 'Draw Your Initials',  widthFrac: 0.08 }
+};
+const TEXT_STAMPS = ['address', 'mc', 'dot', 'phone', 'email'];
+const STAMP_TEXT_LS = 'bol_stamps', STAMP_TEXT_IDB = 'stamp:text';
+const PALETTE = [
+    { kind: 'signature', label: '✍ Sign' },
+    { kind: 'initials',  label: 'Initials' },
+    { kind: 'date',      label: '\u{1F4C5} Date' },
+    { kind: 'address',   label: 'Address' },
+    { kind: 'mc',        label: 'MC' },
+    { kind: 'dot',       label: 'DOT' },
+    { kind: 'phone',     label: 'Phone' },
+    { kind: 'email',     label: 'Email' }
+];
+const STAMP_INK = '#101820';
+// Text stamps print at 11pt on a letter-width page — the size Fill & Sign
+// draws at — so a stamped scan reads like the rest of the paperwork.
+const STAMP_PT_FRAC = 11 / 612;
+
+function stampImage(kind) {
+    try { return localStorage.getItem(IMG_STAMPS[kind].ls) || ''; } catch (_) { return ''; }
+}
+// Each returns whether the fast copy took: a full or blocked localStorage must
+// say so, not toast "saved" over a stamp that never landed (review, card #381).
+function putStampImage(kind, url) {
+    cfgPut(IMG_STAMPS[kind].idb, url);
+    try { localStorage.setItem(IMG_STAMPS[kind].ls, url); return true; } catch (_) { return false; }
+}
+function stampText() {
+    try { return JSON.parse(localStorage.getItem(STAMP_TEXT_LS) || '{}') || {}; } catch (_) { return {}; }
+}
+function putStampText(obj) {
+    cfgPut(STAMP_TEXT_IDB, obj);
+    try { localStorage.setItem(STAMP_TEXT_LS, JSON.stringify(obj)); return true; } catch (_) { return false; }
+}
+function stampReady(kind, t) {
+    if (IMG_STAMPS[kind]) return !!stampImage(kind);
+    if (kind === 'date') return true;
+    return !!String((t || stampText())[kind] || '').trim();
+}
+function todayStamp() {
+    const d = new Date();
+    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0') + '/' + d.getFullYear();
+}
+// Boot: a stamp missing from localStorage comes back from the survivor; one
+// present gains its survivor copy (the signature lived in localStorage alone
+// before this card). Never on the boot's critical path.
+CFG_READY.then(async () => {
+    // localStorage is re-read AFTER each await: a stamp saved while the
+    // survivor was being read must not be healed over by the older value.
+    for (const kind of Object.keys(IMG_STAMPS)) {
+        const st = IMG_STAMPS[kind], kept = await cfgGet(st.idb), have = stampImage(kind);
+        if (have && kept !== have) cfgPut(st.idb, have);
+        else if (!have && kept) { try { localStorage.setItem(st.ls, kept); } catch (_) {} }
+    }
+    const keptText = await cfgGet(STAMP_TEXT_IDB);
+    let haveText = null;
+    try { haveText = localStorage.getItem(STAMP_TEXT_LS); } catch (_) {}
+    if (haveText) cfgPut(STAMP_TEXT_IDB, stampText());
+    else if (keptText) { try { localStorage.setItem(STAMP_TEXT_LS, JSON.stringify(keptText)); } catch (_) {} }
+    refreshStampViews();
+}).catch(e => console.warn('stamp recovery failed', e));
+
+// ── My Stamps: the one-time setup sheet ──────────────────────────────────
+function openStampsSetup(focusKind) {
+    const t = stampText();
+    TEXT_STAMPS.forEach(k => { document.getElementById('stamp_' + k).value = t[k] || ''; });
+    renderStampPreviews();
+    document.getElementById('stampsModal').classList.add('active');
+    if (focusKind && IMG_STAMPS[focusKind]) openSigModal(focusKind);
+    else if (focusKind) setTimeout(() => document.getElementById('stamp_' + focusKind).focus(), 50);
+}
+function closeStampsSetup() {
+    document.getElementById('stampsModal').classList.remove('active');
+}
+function saveStampsSetup() {
+    const t = {};
+    TEXT_STAMPS.forEach(k => {
+        // An address may run two lines; every other stamp is one.
+        const v = document.getElementById('stamp_' + k).value
+            .split(/\r?\n/).map(s => s.trim()).filter(Boolean).join(k === 'address' ? '\n' : ' ');
+        if (v) t[k] = v;
+    });
+    const kept = putStampText(t);
+    closeStampsSetup();
+    refreshStampViews();
+    showToast(kept ? 'Stamps saved' : 'Stamps NOT saved — this phone refused to store them', kept ? 'success' : 'error');
+}
+function renderStampPreviews() {
+    Object.keys(IMG_STAMPS).forEach(kind => {
+        const box = document.getElementById('stampsPrev_' + kind);
+        const url = stampImage(kind);
+        box.className = 'stamps-prev' + (url ? '' : ' empty');
+        box.innerHTML = url ? '<img alt="">' : 'Not set';
+        if (url) box.firstChild.src = url;
+    });
+}
+function refreshStampViews() {
+    if (document.getElementById('stampsModal').classList.contains('active')) renderStampPreviews();
+    if (document.getElementById('stampEditor').classList.contains('active')) {
+        if (stampState.armed && !stampReady(stampState.armed)) stampState.armed = null;
+        renderPalette();
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ── Signature / Initials Drawer ─────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════════
 let sigCtx = null;
 let sigDrawing = false;
 let sigLastPt = null;
 let sigDirty = false;   // has the user drawn anything this session
+let sigKind = 'signature';
 
-function openSigModal() {
+function openSigModal(kind) {
+    sigKind = IMG_STAMPS[kind] ? kind : 'signature';
+    document.getElementById('sigTitle').textContent = IMG_STAMPS[sigKind].title;
     const modal = document.getElementById('sigModal');
     modal.classList.add('active');
 
@@ -1551,8 +1727,8 @@ function openSigModal() {
         sigCtx.lineJoin = 'round';
         sigDirty = false;
 
-        // Load existing signature (as black-on-transparent PNG) onto white pad
-        const existing = localStorage.getItem('bol_signature');
+        // Load the existing one (black-on-transparent PNG) onto the white pad
+        const existing = stampImage(sigKind);
         if (existing) {
             const img = new Image();
             img.onload = () => {
@@ -1631,12 +1807,15 @@ function saveSignature() {
         data.data[i+3] = 255 - lum;  // dark pixels → opaque, white → transparent
     }
     octx.putImageData(data, 0, 0);
-    // Trim transparent margins for cleaner stamping
+    // Trim transparent margins for cleaner stamping. An empty pad trims to
+    // nothing — saving it would make a stamp that prints blank.
     const trimmed = trimTransparent(out);
-    const dataUrl = trimmed.toDataURL('image/png');
-    localStorage.setItem('bol_signature', dataUrl);
+    if (trimmed === out) { showToast('Nothing drawn yet', 'error'); return; }
+    const kept = putStampImage(sigKind, trimmed.toDataURL('image/png'));
     closeSigModal();
-    showToast('Signature saved', 'success');
+    refreshStampViews();
+    showToast(IMG_STAMPS[sigKind].label + (kept ? ' saved' : ' NOT saved — this phone refused to store it'),
+              kept ? 'success' : 'error');
 }
 
 function trimTransparent(src) {
@@ -1671,56 +1850,41 @@ function trimTransparent(src) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ── Stamp Editor (place sig on page, composite onto pageUrl) ────────────
+// ── Stamp Editor (place stamps on a page, composite onto its dataUrl) ───
 // ════════════════════════════════════════════════════════════════════════════
+// Pick a stamp, tap the spot — the Fill & Sign gesture. A placed stamp drags,
+// pinches, and its ✕ removes it; ↩ takes back the last one. Nothing touches
+// the page until Apply, which bakes every stamp into the page in one encode.
+const HANDLE_R = 14;   // the ✕ on the selected stamp, in screen px
 let stampState = {
     pageIdx: -1,
     pageImg: null,
-    sigImg: null,
-    stampPos: null,        // {x,y} in image coords — center of stamp
-    stampScale: 1,         // multiplier on sigBaseWidth
-    sigBaseWidth: 0,       // 25% of page width by default
+    prevSel: -1,
+    placed: [],            // [{kind, src, x, y, w, w0, aspect}] — top-left + width, image coords
+    selected: -1,
+    armed: null,           // the palette stamp waiting for its tap
     activePointers: {},
     pinchStart: null,
-    dragFromCenter: null,  // offset of pointer from stamp center (image coords)
+    drag: null,            // pointer offset from the selected stamp's top-left (image coords)
     scale: 1, offsetX: 0, offsetY: 0
 };
 
 function openStampEditor(idx) {
-    // Refused at the door, not at Accept: turning away a signature he already
+    // Refused at the door, not at Apply: turning away stamps he already
     // placed would throw his work away, and both editors cover the Save button
     // anyway — a send cannot start once one is open.
     if (busySending()) return;
-    const sig = localStorage.getItem('bol_signature');
-    if (!sig) {
-        showToast('Tap ✍ Sig to set up your signature first', 'error');
-        return;
-    }
 
-    stampState.pageIdx = idx;
-    stampState.stampPos = null;
-    stampState.stampScale = 1;
-    stampState.activePointers = {};
-    stampState.pinchStart = null;
-    stampState.dragFromCenter = null;
-
+    Object.assign(stampState, {
+        pageIdx: idx, pageImg: null, placed: [], selected: -1, prevSel: -1, armed: null,
+        activePointers: {}, pinchStart: null, drag: null
+    });
     document.getElementById('stampEditor').classList.add('active');
+    renderPalette();
 
-    const pg = pages[idx];
     const pageImg = new Image();
-    pageImg.onload = () => {
-        stampState.pageImg = pageImg;
-        const sigImg = new Image();
-        sigImg.onload = () => {
-            stampState.sigImg = sigImg;
-            stampState.sigBaseWidth = pageImg.width * 0.25;
-            // Default placement: bottom-right, ~15% margin
-            stampState.stampPos = { x: pageImg.width * 0.72, y: pageImg.height * 0.85 };
-            renderStampCanvas();
-        };
-        sigImg.src = sig;
-    };
-    pageImg.src = pg.dataUrl;
+    pageImg.onload = () => { stampState.pageImg = pageImg; renderStampCanvas(); };
+    pageImg.src = pages[idx].dataUrl;
 
     const canvas = document.getElementById('stampCanvas');
     canvas.onpointerdown = stampDown;
@@ -1732,17 +1896,123 @@ function openStampEditor(idx) {
 function closeStampEditor() {
     document.getElementById('stampEditor').classList.remove('active');
     stampState.pageImg = null;
-    stampState.sigImg = null;
+    stampState.placed = [];
+}
+
+function cancelStampEditor() {
+    const n = stampState.placed.length;
+    if (n && !confirm('Throw away ' + n + (n === 1 ? ' stamp' : ' stamps') + ' on this page?')) return;
+    closeStampEditor();
+}
+
+function setStampStatus() {
+    const el = document.getElementById('stampStatus');
+    const armed = PALETTE.find(p => p.kind === stampState.armed);
+    el.textContent = armed ? 'Tap where the ' + armed.label.replace(/^\S+\s/, '') + ' goes'
+        : stampState.selected >= 0 ? 'Drag to move · pinch to size · ✕ removes'
+        : 'Pick a stamp, then tap where it goes';
+}
+
+function renderPalette() {
+    const t = stampText();
+    const bar = document.getElementById('stampPalette');
+    const keep = bar.scrollLeft;   // re-render must not swing the row back to Sign
+    bar.innerHTML = PALETTE.map(p =>
+        '<button type="button" class="stamp-chip' + (stampState.armed === p.kind ? ' armed' : '')
+        + (stampReady(p.kind, t) ? '' : ' unset') + '" onclick="armStamp(\'' + p.kind + '\')">'
+        + esc(p.label) + '</button>').join('');
+    bar.scrollLeft = keep;
+    setStampStatus();
+}
+
+function armStamp(kind) {
+    // A stamp never set up opens its own setup, right where he reached for it.
+    if (!stampReady(kind)) { openStampsSetup(kind); return; }
+    stampState.armed = stampState.armed === kind ? null : kind;
+    if (stampState.armed) { stampState.selected = -1; renderStampCanvas(); }
+    renderPalette();
+}
+
+function undoStamp() {
+    if (!stampState.placed.length) return;
+    stampState.placed.pop();
+    stampState.selected = -1;
+    renderStampCanvas();
+    setStampStatus();
+}
+
+function loadStampImg(src) {
+    return new Promise((res, rej) => {
+        const i = new Image();
+        i.onload = () => res(i);
+        i.onerror = () => rej(new Error('stamp image did not load'));
+        i.src = src;
+    });
+}
+
+// Text renders at 2× so a pinch to enlarge stays crisp.
+function textStampCanvas(text, fontPx) {
+    const os = 2;
+    const lines = String(text).split('\n');
+    const font = '600 ' + Math.round(fontPx * os) + 'px Helvetica, Arial, sans-serif';
+    const lh = fontPx * os * 1.25;
+    const m = document.createElement('canvas').getContext('2d');
+    m.font = font;
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(Math.max(...lines.map(l => m.measureText(l).width))) + 2 * os;
+    c.height = Math.ceil(lh * lines.length);
+    const g = c.getContext('2d');
+    g.font = font;
+    g.fillStyle = STAMP_INK;
+    g.textBaseline = 'middle';
+    lines.forEach((l, i) => g.fillText(l, os, lh * i + lh / 2));
+    return { src: c, w: c.width / os };
+}
+
+let stampPlacing = false;
+async function placeStamp(kind, ix, iy) {
+    if (stampPlacing) return;
+    stampPlacing = true;
+    try {
+        const { pageImg } = stampState;
+        if (!stampReady(kind)) throw new Error('stamp not set up');
+        let src, w;
+        if (IMG_STAMPS[kind]) {
+            src = await loadStampImg(stampImage(kind));
+            w = pageImg.width * IMG_STAMPS[kind].widthFrac;
+        } else {
+            const text = kind === 'date' ? todayStamp() : stampText()[kind];
+            ({ src, w } = textStampCanvas(text, pageImg.width * STAMP_PT_FRAC));
+        }
+        if (stampState.pageImg !== pageImg) return;   // the editor closed while the image loaded
+        const aspect = src.height / src.width, h = w * aspect;
+        // Ink sits ON the line he tapped — a signature's tail dips just below
+        // it; text rests on it.
+        let x = IMG_STAMPS[kind] ? ix - w / 2 : ix;
+        let y = iy - h * (IMG_STAMPS[kind] ? 0.85 : 0.9);
+        x = Math.max(0, Math.min(pageImg.width - w, x));
+        y = Math.max(0, Math.min(pageImg.height - h, y));
+        stampState.placed.push({ kind, src, x, y, w, w0: w, aspect });
+        stampState.selected = stampState.placed.length - 1;
+        stampState.armed = null;
+        renderPalette();
+        renderStampCanvas();
+    } catch (e) {
+        showToast('That stamp could not be drawn — set it up again under ✍ Stamps', 'error');
+    } finally {
+        stampPlacing = false;
+    }
 }
 
 function renderStampCanvas() {
     const canvas = document.getElementById('stampCanvas');
     const ctx = canvas.getContext('2d');
-    const { pageImg, sigImg, stampPos, stampScale, sigBaseWidth } = stampState;
-    if (!pageImg || !sigImg || !stampPos) return;
+    const { pageImg, placed, selected } = stampState;
+    if (!pageImg) return;
     const vp = document.getElementById('stampViewport');
     const vpW = vp.clientWidth;
     const vpH = vp.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
 
     const fit = Math.min(vpW / pageImg.width, vpH / pageImg.height);
     const drawW = pageImg.width * fit;
@@ -1754,84 +2024,136 @@ function renderStampCanvas() {
     stampState.offsetX = offX;
     stampState.offsetY = offY;
 
-    canvas.width = vpW;
-    canvas.height = vpH;
+    const bw = Math.round(vpW * dpr), bh = Math.round(vpH * dpr);
+    if (canvas.width !== bw || canvas.height !== bh) {   // every drag frame re-renders; reallocate only on resize
+        canvas.width = bw; canvas.height = bh;
+        canvas.style.width = vpW + 'px';
+        canvas.style.height = vpH + 'px';
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, vpW, vpH);
     ctx.drawImage(pageImg, offX, offY, drawW, drawH);
 
-    // Compute stamp box in image coords, then project to canvas
-    const sigW = sigBaseWidth * stampScale;
-    const sigH = sigW * (sigImg.height / sigImg.width);
-    const sx = offX + (stampPos.x - sigW / 2) * fit;
-    const sy = offY + (stampPos.y - sigH / 2) * fit;
-    const sw = sigW * fit;
-    const sh = sigH * fit;
-    ctx.drawImage(sigImg, sx, sy, sw, sh);
+    placed.forEach(s => ctx.drawImage(s.src, offX + s.x * fit, offY + s.y * fit, s.w * fit, s.w * s.aspect * fit));
 
-    // Dashed handle for visibility
-    ctx.strokeStyle = 'rgba(229,181,36,0.85)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    ctx.strokeRect(sx, sy, sw, sh);
-    ctx.setLineDash([]);
+    const s = placed[selected];
+    if (s) {
+        const sx = offX + s.x * fit, sy = offY + s.y * fit, sw = s.w * fit, sh = s.w * s.aspect * fit;
+        ctx.strokeStyle = 'rgba(229,181,36,0.9)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(sx - 3, sy - 3, sw + 6, sh + 6);
+        ctx.setLineDash([]);
+        const hx = sx + sw + 3, hy = sy - 3;
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.arc(hx, hy, HANDLE_R, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(hx - 5, hy - 5); ctx.lineTo(hx + 5, hy + 5);
+        ctx.moveTo(hx + 5, hy - 5); ctx.lineTo(hx - 5, hy + 5);
+        ctx.stroke();
+    }
+}
+
+// An 11pt text stamp is 6-10 screen px tall — too thin to land a finger on.
+// Every stamp answers to at least a 44px target, the selected one first.
+function stampHit(ix, iy) {
+    const { placed, selected, scale } = stampState;
+    const minI = 44 / scale;
+    const inside = s => {
+        const h = s.w * s.aspect;
+        const padX = Math.max(0, (minI - s.w) / 2), padY = Math.max(0, (minI - h) / 2);
+        return ix >= s.x - padX && ix <= s.x + s.w + padX && iy >= s.y - padY && iy <= s.y + h + padY;
+    };
+    if (placed[selected] && inside(placed[selected])) return selected;
+    for (let i = placed.length - 1; i >= 0; i--) if (inside(placed[i])) return i;
+    return -1;
 }
 
 function stampDown(e) {
     e.preventDefault();
     e.target.setPointerCapture(e.pointerId);
     stampState.activePointers[e.pointerId] = { x: e.clientX, y: e.clientY };
+    const { scale, offsetX, offsetY, pageImg, placed } = stampState;
+    if (!pageImg) return;
 
     const ptrs = Object.values(stampState.activePointers);
     if (ptrs.length === 2) {
-        stampState.pinchStart = {
-            dist: Math.hypot(ptrs[1].x - ptrs[0].x, ptrs[1].y - ptrs[0].y),
-            scale: stampState.stampScale
-        };
-        stampState.dragFromCenter = null;
-    } else if (ptrs.length === 1) {
-        const rect = e.target.getBoundingClientRect();
-        const tx = e.clientX - rect.left;
-        const ty = e.clientY - rect.top;
-        const { scale, offsetX, offsetY, pageImg, stampPos, sigBaseWidth, stampScale, sigImg } = stampState;
-        const ix = (tx - offsetX) / scale;
-        const iy = (ty - offsetY) / scale;
-        const sigW = sigBaseWidth * stampScale;
-        const sigH = sigW * (sigImg.height / sigImg.width);
-        // If tap lands inside stamp → drag relative; else → teleport stamp to tap
-        const inside = Math.abs(ix - stampPos.x) < sigW / 2 && Math.abs(iy - stampPos.y) < sigH / 2;
-        if (inside) {
-            stampState.dragFromCenter = { x: ix - stampPos.x, y: iy - stampPos.y };
-        } else if (ix >= 0 && ix <= pageImg.width && iy >= 0 && iy <= pageImg.height) {
-            stampState.stampPos = { x: ix, y: iy };
-            stampState.dragFromCenter = { x: 0, y: 0 };
+        // A pinch puts a finger either side of the stamp, so the first finger
+        // usually misses it and deselects — the second restores what it held.
+        if (stampState.selected < 0 && placed[stampState.prevSel]) {
+            stampState.selected = stampState.prevSel;
             renderStampCanvas();
+            setStampStatus();
+        }
+        const s = placed[stampState.selected];
+        stampState.drag = null;
+        if (s) stampState.pinchStart = {
+            dist: Math.hypot(ptrs[1].x - ptrs[0].x, ptrs[1].y - ptrs[0].y), w: s.w,
+            cx: s.x + s.w / 2, cy: s.y + s.w * s.aspect / 2
+        };
+        return;
+    }
+    if (ptrs.length !== 1) return;
+
+    const rect = e.target.getBoundingClientRect();
+    const tx = e.clientX - rect.left;
+    const ty = e.clientY - rect.top;
+    const ix = (tx - offsetX) / scale;
+    const iy = (ty - offsetY) / scale;
+
+    stampState.prevSel = stampState.selected;
+    // The ✕ on the selected stamp — not while a stamp is armed: that tap is a placement
+    const sel = placed[stampState.selected];
+    if (sel && !stampState.armed) {
+        const hx = offsetX + (sel.x + sel.w) * scale + 3, hy = offsetY + sel.y * scale - 3;
+        if (Math.hypot(tx - hx, ty - hy) <= HANDLE_R + 8) {
+            placed.splice(stampState.selected, 1);
+            stampState.selected = stampState.prevSel = -1;
+            renderStampCanvas();
+            setStampStatus();
+            return;
         }
     }
+    const onPage = ix >= 0 && ix <= pageImg.width && iy >= 0 && iy <= pageImg.height;
+    if (stampState.armed) {
+        if (onPage) placeStamp(stampState.armed, ix, iy);
+        return;
+    }
+    const hit = stampHit(ix, iy);
+    stampState.selected = hit;
+    stampState.drag = hit >= 0 ? { dx: ix - placed[hit].x, dy: iy - placed[hit].y } : null;
+    renderStampCanvas();
+    setStampStatus();
 }
 
 function stampMove(e) {
     if (!stampState.activePointers[e.pointerId]) return;
     e.preventDefault();
     stampState.activePointers[e.pointerId] = { x: e.clientX, y: e.clientY };
+    const { placed, selected, pageImg } = stampState;
+    const s = placed[selected];
+    if (!s || !pageImg) return;
 
     const ptrs = Object.values(stampState.activePointers);
     if (ptrs.length === 2 && stampState.pinchStart) {
+        const ps = stampState.pinchStart;
         const dist = Math.hypot(ptrs[1].x - ptrs[0].x, ptrs[1].y - ptrs[0].y);
-        const newScale = stampState.pinchStart.scale * (dist / stampState.pinchStart.dist);
-        stampState.stampScale = Math.max(0.25, Math.min(3, newScale));
+        s.w = Math.max(s.w0 * 0.25, Math.min(s.w0 * 4, ps.w * (dist / ps.dist)));
+        s.x = ps.cx - s.w / 2;      // grow and shrink about the stamp's own centre
+        s.y = ps.cy - s.w * s.aspect / 2;
         renderStampCanvas();
-    } else if (ptrs.length === 1 && stampState.dragFromCenter) {
+    } else if (ptrs.length === 1 && stampState.drag) {
         const rect = e.target.getBoundingClientRect();
-        const tx = e.clientX - rect.left;
-        const ty = e.clientY - rect.top;
-        const { scale, offsetX, offsetY, pageImg, dragFromCenter } = stampState;
-        const ix = (tx - offsetX) / scale - dragFromCenter.x;
-        const iy = (ty - offsetY) / scale - dragFromCenter.y;
-        stampState.stampPos = {
-            x: Math.max(0, Math.min(pageImg.width, ix)),
-            y: Math.max(0, Math.min(pageImg.height, iy))
-        };
+        const ix = (e.clientX - rect.left - stampState.offsetX) / stampState.scale;
+        const iy = (e.clientY - rect.top - stampState.offsetY) / stampState.scale;
+        const h = s.w * s.aspect;
+        // At least half the stamp stays on the page — one dragged fully off
+        // could never be grabbed again.
+        s.x = Math.max(-s.w / 2, Math.min(pageImg.width - s.w / 2, ix - stampState.drag.dx));
+        s.y = Math.max(-h / 2, Math.min(pageImg.height - h / 2, iy - stampState.drag.dy));
         renderStampCanvas();
     }
 }
@@ -1839,32 +2161,30 @@ function stampMove(e) {
 function stampUp(e) {
     delete stampState.activePointers[e.pointerId];
     if (Object.keys(stampState.activePointers).length < 2) stampState.pinchStart = null;
-    if (Object.keys(stampState.activePointers).length === 0) stampState.dragFromCenter = null;
+    if (Object.keys(stampState.activePointers).length === 0) stampState.drag = null;
 }
 
 function acceptStamp() {
-    const { pageIdx, pageImg, sigImg, stampPos, stampScale, sigBaseWidth } = stampState;
-    if (!pageImg || !sigImg || !stampPos) { closeStampEditor(); return; }
+    const { pageIdx, pageImg, placed } = stampState;
+    if (!pageImg || !placed.length) { closeStampEditor(); return; }
 
     const c = document.createElement('canvas');
     c.width = pageImg.width;
     c.height = pageImg.height;
     const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(pageImg, 0, 0);
-
-    const sigW = sigBaseWidth * stampScale;
-    const sigH = sigW * (sigImg.height / sigImg.width);
-    const sx = stampPos.x - sigW / 2;
-    const sy = stampPos.y - sigH / 2;
-    ctx.drawImage(sigImg, sx, sy, sigW, sigH);
+    placed.forEach(s => ctx.drawImage(s.src, s.x, s.y, s.w, s.w * s.aspect));
 
     // Match the page pipeline's quality — this re-encodes an already-cleaned page,
     // so a lower setting here would quietly undo some of that work.
     const newUrl = c.toDataURL('image/jpeg', OUT_QUALITY);
+    const n = placed.length;
     pages[pageIdx] = { dataUrl: newUrl, width: pageImg.width, height: pageImg.height, stamped: true };
     renderPages();
     closeStampEditor();
-    showToast('Signature applied', 'success');
+    showToast(n === 1 ? 'Stamp applied' : n + ' stamps applied', 'success');
 }
 
 // ── Pages Rendering ─────────────────────────────────────────────────────────
@@ -1897,7 +2217,7 @@ function renderPages() {
             + (i === 0 ? ' disabled' : '') + '>&#8592;</button>'
             + '<button class="page-move right" onclick="event.stopPropagation();movePage(' + i + ',1)" title="Move later"'
             + (i === pages.length - 1 ? ' disabled' : '') + '>&#8594;</button>'
-            + '<button class="page-stamp" onclick="event.stopPropagation();openStampEditor(' + i + ')" title="Add signature">&#9998;</button>'
+            + '<button class="page-stamp" onclick="event.stopPropagation();openStampEditor(' + i + ')" title="Stamp this page">&#9998;</button>'
             + '</div>';
     });
     container.innerHTML = html + '</div>';
